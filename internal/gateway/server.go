@@ -17,6 +17,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"google.golang.org/genai"
 	"homevoice/internal/config"
+	"homevoice/internal/guard"
 	"homevoice/internal/homeassistant"
 )
 
@@ -38,8 +39,9 @@ type socketWriter struct {
 }
 
 type liveSession struct {
-	session *genai.Session
-	mu      sync.Mutex
+	session             *genai.Session
+	mu                  sync.Mutex
+	lastInputTranscript string
 }
 
 func New(cfg config.Config, logger *log.Logger) *Server {
@@ -198,6 +200,7 @@ func (server *Server) readBrowser(ctx context.Context, connection *websocket.Con
 			}
 		case "text":
 			if strings.TrimSpace(event.Text) != "" {
+				live.setInputTranscript(event.Text)
 				complete := true
 				if err := live.sendContent(genai.LiveClientContentInput{
 					Turns:        []*genai.Content{genai.NewContentFromText(event.Text, genai.RoleUser)},
@@ -214,6 +217,7 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, li
 	content := message.ServerContent
 	if content != nil {
 		if content.InputTranscription != nil && content.InputTranscription.Text != "" {
+			live.setInputTranscript(content.InputTranscription.Text)
 			writer.send(ctx, map[string]any{"type": "input_transcript", "text": content.InputTranscription.Text})
 		}
 		if content.OutputTranscription != nil && content.OutputTranscription.Text != "" {
@@ -241,6 +245,7 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, li
 		}
 		if content.TurnComplete {
 			writer.send(ctx, map[string]any{"type": "turn_complete", "reason": content.TurnCompleteReason})
+			live.setInputTranscript("")
 		}
 	}
 	if message.UsageMetadata != nil {
@@ -264,6 +269,16 @@ func (server *Server) executeTools(ctx context.Context, writer *socketWriter, li
 			action = "get_state"
 		}
 		temperature, _ := call.Args["temperature"].(float64)
+		if call.Name == "control_home_entity" {
+			if err := guard.ValidateTranscriptAction(live.inputTranscript(), action); err != nil {
+				payload := map[string]any{"ok": false, "error": err.Error(), "rejected": true}
+				writer.send(ctx, map[string]any{"type": "ha_result", "result": payload})
+				responses = append(responses, &genai.FunctionResponse{
+					ID: call.ID, Name: call.Name, Response: map[string]any{"error": err.Error()},
+				})
+				continue
+			}
+		}
 		result, err := server.home.Perform(ctx, entityID, action, temperature)
 		var payload map[string]any
 		if err != nil {
@@ -287,15 +302,45 @@ func (server *Server) executeTools(ctx context.Context, writer *socketWriter, li
 }
 
 func liveConfig(entities []homeassistant.Entity, responseMode string) *genai.LiveConnectConfig {
+	temperature := float32(0)
 	return &genai.LiveConnectConfig{
-		ResponseModalities:       []genai.Modality{genai.ModalityAudio},
-		MaxOutputTokens:          64,
-		ThinkingConfig:           &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal},
-		SystemInstruction:        genai.NewContentFromText(buildInstructions(entities, responseMode), genai.RoleUser),
-		Tools:                    buildTools(entities),
-		InputAudioTranscription:  &genai.AudioTranscriptionConfig{},
-		OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
+		ResponseModalities: []genai.Modality{genai.ModalityAudio},
+		Temperature:        &temperature,
+		MaxOutputTokens:    64,
+		ThinkingConfig:     &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal},
+		SpeechConfig:       &genai.SpeechConfig{LanguageCode: "ru-RU"},
+		SystemInstruction:  genai.NewContentFromText(buildInstructions(entities, responseMode), genai.RoleUser),
+		Tools:              buildTools(entities),
+		InputAudioTranscription: &genai.AudioTranscriptionConfig{
+			LanguageCodes:    []string{"ru-RU"},
+			CustomVocabulary: transcriptionVocabulary(entities),
+		},
+		OutputAudioTranscription: &genai.AudioTranscriptionConfig{LanguageCodes: []string{"ru-RU"}},
 	}
+}
+
+func transcriptionVocabulary(entities []homeassistant.Entity) []string {
+	vocabulary := []string{
+		"включи", "выключи", "отключи", "свет", "лампа", "кондиционер",
+		"температура", "градусы", "кухня", "спальня", "гостиная",
+	}
+	seen := make(map[string]bool, len(vocabulary)+len(entities)*2)
+	result := make([]string, 0, len(vocabulary)+len(entities)*2)
+	for _, phrase := range vocabulary {
+		seen[strings.ToLower(phrase)] = true
+		result = append(result, phrase)
+	}
+	for _, entity := range entities {
+		for _, phrase := range []string{entity.Name, entity.Area} {
+			phrase = strings.TrimSpace(phrase)
+			key := strings.ToLower(phrase)
+			if phrase != "" && !seen[key] {
+				seen[key] = true
+				result = append(result, phrase)
+			}
+		}
+	}
+	return result
 }
 
 func buildInstructions(entities []homeassistant.Entity, responseMode string) string {
@@ -313,13 +358,16 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 	}
 	return strings.Join([]string{
 		"Ты голосовой ассистент умного дома.",
-		"Всегда отвечай по-русски.",
+		"Пользователь всегда говорит по-русски; распознавай вход только как русскую речь и всегда отвечай по-русски.",
+		"Никогда не превращай нерусскую или сомнительную расшифровку в команду умного дома: попроси повторить.",
+		"Строго различай противоположные команды: включи означает только turn_on, выключи или отключи означает только turn_off.",
 		"Любой ответ содержит не больше пяти слов.",
 		"Никаких приветствий, объяснений, планов, советов и лишних вопросов.",
 		"После успешного действия " + verb + " только краткий итог.",
 		"Если команда неоднозначна, задай ровно один короткий вопрос с вариантами и жди ответа.",
 		"Для управления используй только control_home_entity и get_home_state.",
 		"Не утверждай, что действие выполнено, пока функция не вернула ok=true.",
+		"Если функция отклонила команду из-за ненадёжного распознавания, ничего не выполняй и попроси повторить команду.",
 		"Для turn_on, turn_off и toggle сразу вызови control_home_entity один раз.",
 		"Не вызывай get_home_state до или после управления.",
 		"На явный вопрос о состоянии обязательно вызови get_home_state.",
@@ -392,6 +440,18 @@ func (live *liveSession) sendTools(input genai.LiveToolResponseInput) error {
 	live.mu.Lock()
 	defer live.mu.Unlock()
 	return live.session.SendToolResponse(input)
+}
+
+func (live *liveSession) setInputTranscript(value string) {
+	live.mu.Lock()
+	defer live.mu.Unlock()
+	live.lastInputTranscript = strings.TrimSpace(value)
+}
+
+func (live *liveSession) inputTranscript() string {
+	live.mu.Lock()
+	defer live.mu.Unlock()
+	return live.lastInputTranscript
 }
 
 func (live *liveSession) close() {
