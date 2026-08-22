@@ -6,3 +6,4 @@ bin/
 .wakeword-job
 wakeword/models/
 wakeword/runtime/
+wakeword-micro/

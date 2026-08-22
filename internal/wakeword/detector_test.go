@@ -5,6 +5,11 @@ import (
 	"testing"
 )
 
+func TestDetectorsImplementStreamContract(t *testing.T) {
+	var _ StreamDetector = (*Detector)(nil)
+	var _ StreamDetector = (*MicroDetector)(nil)
+}
+
 func TestRejectsInvalidThreshold(t *testing.T) {
 	if _, err := New(Config{Threshold: 1.1}); err == nil {
 		t.Fatal("expected invalid threshold to fail before loading assets")
@@ -37,6 +42,30 @@ func TestOfficialHeyJarvisModelSuppressesSilence(t *testing.T) {
 		}
 		if detected || score >= 0.01 {
 			t.Fatalf("silence score must stay negligible, detected=%v score=%f", detected, score)
+		}
+	}
+}
+
+func TestMicroKuzaModelLoadsAndSuppressesSilence(t *testing.T) {
+	assets := os.Getenv("HOMEVOICE_MICRO_WAKE_ASSETS")
+	if assets == "" {
+		t.Skip("set HOMEVOICE_MICRO_WAKE_ASSETS to run microWakeWord integration test")
+	}
+	detector, err := NewMicro(MicroConfig{AssetsDir: assets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer detector.Close()
+	if detector.Phrase() != "Куза" {
+		t.Fatalf("phrase = %q, want Куза", detector.Phrase())
+	}
+	for chunk := 0; chunk < 100; chunk++ {
+		detected, score, err := detector.ProcessPCM16(make([]byte, 320*2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if detected || score >= 0.85 {
+			t.Fatalf("silence must stay below Kuza threshold, detected=%v score=%f", detected, score)
 		}
 	}
 }

@@ -25,6 +25,7 @@ type Client struct {
 }
 
 type WakeConfig struct {
+	Engine         string
 	AssetsDir      string
 	Threshold      float32
 	VADThreshold   float32
@@ -134,11 +135,20 @@ func (client Client) RunVoice(ctx context.Context) error {
 }
 
 func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
-	detector, err := wakeword.New(wakeword.Config{
-		AssetsDir:    config.AssetsDir,
-		Threshold:    config.Threshold,
-		VADThreshold: config.VADThreshold,
-	})
+	var detector wakeword.StreamDetector
+	var err error
+	if config.Engine == "micro" {
+		detector, err = wakeword.NewMicro(wakeword.MicroConfig{
+			AssetsDir: config.AssetsDir,
+			Threshold: config.Threshold,
+		})
+	} else {
+		detector, err = wakeword.New(wakeword.Config{
+			AssetsDir:    config.AssetsDir,
+			Threshold:    config.Threshold,
+			VADThreshold: config.VADThreshold,
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -155,7 +165,9 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 		if config.TestOnly {
 			detections++
 			fprintf(client.Output, "Тест: успешных срабатываний %d. Продолжаю слушать…\n", detections)
-			detector.Reset()
+			if err := detector.Reset(); err != nil {
+				return err
+			}
 			continue
 		}
 		sessionCtx := ctx
@@ -168,11 +180,13 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			fprintf(client.Output, "Голосовая сессия: %v\n", err)
 		}
-		detector.Reset()
+		if err := detector.Reset(); err != nil {
+			return err
+		}
 	}
 }
 
-func (client Client) waitForWake(ctx context.Context, detector *wakeword.Detector, debug bool) error {
+func (client Client) waitForWake(ctx context.Context, detector wakeword.StreamDetector, debug bool) error {
 	audio, err := NewAudio()
 	if err != nil {
 		return fmt.Errorf("wake audio: %w", err)
@@ -181,7 +195,7 @@ func (client Client) waitForWake(ctx context.Context, detector *wakeword.Detecto
 	if err := audio.Start(); err != nil {
 		return fmt.Errorf("wake audio start: %w", err)
 	}
-	fprintf(client.Output, "Жду: «Хей, Джарвис»…\n")
+	fprintf(client.Output, "Жду: «%s»…\n", detector.Phrase())
 	debugStarted := time.Now()
 	var debugMaximum float32
 	debugPeakDBFS := -96.0

@@ -21,8 +21,9 @@ func main() {
 	gateway := flag.String("gateway", "ws://127.0.0.1:3000/live", "WebSocket URL Go gateway")
 	provider := flag.String("provider", envOr("VOICE_PROVIDER", "gemini"), "voice provider: gemini или openai")
 	timeout := flag.Duration("timeout", 45*time.Second, "максимальная длительность одной сессии")
-	wakeAssets := flag.String("wake-assets", "", "каталог моделей и ONNX Runtime")
-	wakeThreshold := flag.Float64("wake-threshold", 0.35, "порог Hey Jarvis от 0 до 1")
+	wakeEngine := flag.String("wake-engine", envOr("HOMEVOICE_WAKE_ENGINE", "micro"), "wake engine: micro (Куза) или openwakeword (Hey Jarvis)")
+	wakeAssets := flag.String("wake-assets", "", "каталог моделей выбранного wake engine")
+	wakeThreshold := flag.Float64("wake-threshold", 0, "порог от 0 до 1; 0 использует значение модели")
 	vadThreshold := flag.Float64("vad-threshold", 0, "порог голосовой активности от 0 до 1; 0 отключает VAD")
 	wakeDebug := flag.Bool("wake-debug", false, "показывать максимальный wake score раз в секунду")
 	flag.Parse()
@@ -39,12 +40,25 @@ func main() {
 	var err error
 	switch *mode {
 	case "wake", "wake-test":
-		assets, assetsErr := resolveWakeAssets(*wakeAssets)
+		*wakeEngine = strings.ToLower(strings.TrimSpace(*wakeEngine))
+		if *wakeEngine != "micro" && *wakeEngine != "openwakeword" {
+			err = fmt.Errorf("неизвестный wake engine %q: используй micro или openwakeword", *wakeEngine)
+			break
+		}
+		if *wakeThreshold < 0 || *wakeThreshold > 1 {
+			err = fmt.Errorf("wake-threshold должен быть от 0 до 1")
+			break
+		}
+		if *wakeThreshold == 0 && *wakeEngine == "openwakeword" {
+			*wakeThreshold = 0.35
+		}
+		assets, assetsErr := resolveWakeAssets(*wakeEngine, *wakeAssets)
 		if assetsErr != nil {
 			err = assetsErr
 			break
 		}
 		err = client.RunWake(ctx, satellite.WakeConfig{
+			Engine:         *wakeEngine,
 			AssetsDir:      assets,
 			Threshold:      float32(*wakeThreshold),
 			VADThreshold:   float32(*vadThreshold),
@@ -92,22 +106,42 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
-func resolveWakeAssets(configured string) (string, error) {
+func resolveWakeAssets(engine, configured string) (string, error) {
 	if configured == "" {
-		configured = strings.TrimSpace(os.Getenv("HOMEVOICE_WAKE_ASSETS"))
+		if engine == "micro" {
+			configured = strings.TrimSpace(os.Getenv("HOMEVOICE_MICRO_WAKE_ASSETS"))
+		} else {
+			configured = strings.TrimSpace(os.Getenv("HOMEVOICE_WAKE_ASSETS"))
+		}
 	}
 	candidates := make([]string, 0, 3)
 	if configured != "" {
 		candidates = append(candidates, configured)
 	} else {
-		candidates = append(candidates, "wakeword")
+		assetsName := "wakeword"
+		if engine == "micro" {
+			assetsName = "wakeword-micro"
+		}
+		candidates = append(candidates, assetsName)
 		if executable, err := os.Executable(); err == nil {
-			candidates = append(candidates, filepath.Join(filepath.Dir(executable), "..", "wakeword"))
+			candidates = append(candidates, filepath.Join(filepath.Dir(executable), "..", assetsName))
 		}
 	}
 	for _, candidate := range candidates {
 		absolute, err := filepath.Abs(candidate)
 		if err != nil {
+			continue
+		}
+		if engine == "micro" {
+			python := filepath.Join(absolute, "venv", "bin", "python")
+			if runtime.GOOS == "windows" {
+				python = filepath.Join(absolute, "venv", "Scripts", "python.exe")
+			}
+			if _, err := os.Stat(filepath.Join(absolute, "Kuza.json")); err == nil {
+				if _, err := os.Stat(python); err == nil {
+					return absolute, nil
+				}
+			}
 			continue
 		}
 		library := "libonnxruntime.so"
@@ -119,6 +153,9 @@ func resolveWakeAssets(configured string) (string, error) {
 		if _, err := os.Stat(filepath.Join(absolute, "runtime", library)); err == nil {
 			return absolute, nil
 		}
+	}
+	if engine == "micro" {
+		return "", fmt.Errorf("модель Куза не найдена; выполни `make setup-kuza` или передай -wake-assets /полный/путь/wakeword-micro")
 	}
 	return "", fmt.Errorf("wake word assets не найдены; выполни `make setup-wakeword` в каталоге проекта или передай -wake-assets /полный/путь/wakeword")
 }

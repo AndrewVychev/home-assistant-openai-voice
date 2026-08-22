@@ -22,7 +22,30 @@ func TestResolveWakeAssetsFromExplicitPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(runtimeDirectory, library), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := resolveWakeAssets(directory)
+	resolved, err := resolveWakeAssets("openwakeword", directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != directory {
+		t.Fatalf("expected %q, got %q", directory, resolved)
+	}
+}
+
+func TestResolveMicroWakeAssetsFromExplicitPath(t *testing.T) {
+	directory := t.TempDir()
+	python := filepath.Join(directory, "venv", "bin", "python")
+	if runtime.GOOS == "windows" {
+		python = filepath.Join(directory, "venv", "Scripts", "python.exe")
+	}
+	if err := os.MkdirAll(filepath.Dir(python), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(directory, "Kuza.json"), python} {
+		if err := os.WriteFile(path, nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolved, err := resolveWakeAssets("micro", directory)
 	if err != nil {
 		t.Fatal(err)
 	}

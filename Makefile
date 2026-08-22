@@ -1,4 +1,4 @@
-.PHONY: build test run wake voice text setup-wakeword
+.PHONY: build test run wake voice text setup-wakeword setup-kuza
 
 build:
 	mkdir -p bin
@@ -23,3 +23,6 @@ text:
 
 setup-wakeword:
 	bash scripts/setup-wakeword.sh
+
+setup-kuza:
+	bash scripts/setup-kuza.sh

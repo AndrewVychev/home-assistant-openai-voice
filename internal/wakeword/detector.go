@@ -135,13 +135,18 @@ func pcm16Samples(data []byte) openwakeword.Samples {
 	return samples
 }
 
-func (detector *Detector) Reset() {
+func (detector *Detector) Reset() error {
 	detector.mu.Lock()
 	defer detector.mu.Unlock()
 	if detector.engine != nil {
 		detector.engine.Reset()
 		detector.pending = detector.pending[:0]
 	}
+	return nil
+}
+
+func (detector *Detector) Phrase() string {
+	return "Хей, Джарвис"
 }
 
 func (detector *Detector) Close() error {
