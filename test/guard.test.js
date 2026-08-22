@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateEntityAction } from "../lib/guard.js";
+import { actionStateMatches, validateEntityAction } from "../lib/guard.js";
 
 test("allows direct control of lights", () => {
   const result = validateEntityAction({ entityId: "light.bedroom_lamp", action: "turn_on" });
@@ -19,4 +19,21 @@ test("limits climate temperature", () => {
     temperature: 45,
   });
   assert.equal(result.ok, false);
+});
+
+test("accepts an active climate mode as successful turn_on", () => {
+  assert.equal(
+    actionStateMatches(
+      { domain: "climate", action: "turn_on" },
+      { state: "fan_only", attributes: {} },
+    ),
+    true,
+  );
+  assert.equal(
+    actionStateMatches(
+      { domain: "climate", action: "turn_on" },
+      { state: "off", attributes: {} },
+    ),
+    false,
+  );
 });

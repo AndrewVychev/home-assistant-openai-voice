@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { GoogleGenAI, Modality } from "@google/genai";
 import express from "express";
 import WebSocket, { WebSocketServer } from "ws";
-import { validateEntityAction } from "./lib/guard.js";
+import { actionStateMatches, validateEntityAction } from "./lib/guard.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -232,60 +232,76 @@ app.get("/api/health", async (_req, res) => {
 });
 
 async function performHomeAction(body = {}) {
-    const requestedAction = body.action || "get_state";
-    const validation = validateEntityAction({
-      entityId: body.entity_id,
-      action: requestedAction,
-      temperature: body.temperature,
-    });
-    if (!validation.ok) {
-      const error = new Error(validation.reason);
-      error.statusCode = 403;
-      throw error;
-    }
+  const requestedAction = body.action || "get_state";
+  const validation = validateEntityAction({
+    entityId: body.entity_id,
+    action: requestedAction,
+    temperature: body.temperature,
+  });
+  if (!validation.ok) {
+    const error = new Error(validation.reason);
+    error.statusCode = 403;
+    throw error;
+  }
 
-    if (validation.action === "get_state") {
-      const response = await haRequest(`/api/states/${validation.entityId}`);
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const error = new Error(`Home Assistant ответил ${response.status}.`);
-        error.statusCode = response.status;
-        throw error;
-      }
-      return {
-        ok: true,
-        entityId: validation.entityId,
-        name: data.attributes?.friendly_name || validation.entityId,
-        state: data.state,
-        temperature: data.attributes?.current_temperature,
-      };
-    }
-
-    const serviceData = { entity_id: validation.entityId };
-    if (validation.action === "set_temperature") {
-      serviceData.temperature = validation.temperature;
-    }
-    const response = await haRequest(
-      `/api/services/${validation.domain}/${validation.action}`,
-      { method: "POST", body: JSON.stringify(serviceData) },
-    );
+  async function readState() {
+    const response = await haRequest(`/api/states/${validation.entityId}`);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       const error = new Error(`Home Assistant ответил ${response.status}.`);
       error.statusCode = response.status;
-      error.details = data;
       throw error;
     }
+    return data;
+  }
 
-    const stateResponse = await haRequest(`/api/states/${validation.entityId}`);
-    const state = await stateResponse.json().catch(() => ({}));
+  if (validation.action === "get_state") {
+    const data = await readState();
     return {
       ok: true,
       entityId: validation.entityId,
-      action: validation.action,
-      state: state.state,
-      name: state.attributes?.friendly_name || validation.entityId,
+      name: data.attributes?.friendly_name || validation.entityId,
+      state: data.state,
+      temperature: data.attributes?.current_temperature,
     };
+  }
+
+  const previousState = await readState().catch(() => null);
+  const serviceData = { entity_id: validation.entityId };
+  if (validation.action === "set_temperature") {
+    serviceData.temperature = validation.temperature;
+  }
+  const response = await haRequest(
+    `/api/services/${validation.domain}/${validation.action}`,
+    { method: "POST", body: JSON.stringify(serviceData) },
+  );
+  const serviceResponse = await response.json().catch(() => ({}));
+
+  let state = previousState || {};
+  let confirmed = false;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 400));
+    state = await readState().catch(() => state);
+    confirmed = actionStateMatches(validation, state, previousState);
+    if (confirmed) break;
+  }
+
+  if (!response.ok && !confirmed) {
+    const error = new Error(`Home Assistant ответил ${response.status}.`);
+    error.statusCode = response.status;
+    error.details = { serviceResponse, resultingState: state.state };
+    throw error;
+  }
+
+  return {
+    ok: true,
+    entityId: validation.entityId,
+    action: validation.action,
+    state: state.state,
+    name: state.attributes?.friendly_name || validation.entityId,
+    confirmed,
+    ...(response.ok ? {} : { recoveredFromStatus: response.status }),
+  };
 }
 
 app.post("/api/ha/entity", async (req, res, next) => {
