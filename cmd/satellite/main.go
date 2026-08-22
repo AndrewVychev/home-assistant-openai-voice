@@ -17,12 +17,12 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "wake", "wake, voice или text")
+	mode := flag.String("mode", "wake", "wake, wake-test, voice или text")
 	gateway := flag.String("gateway", "ws://127.0.0.1:3000/gemini-live", "WebSocket URL Go gateway")
 	timeout := flag.Duration("timeout", 45*time.Second, "максимальная длительность одной сессии")
 	wakeAssets := flag.String("wake-assets", "", "каталог моделей и ONNX Runtime")
-	wakeThreshold := flag.Float64("wake-threshold", 0.50, "порог Hey Jarvis от 0 до 1")
-	vadThreshold := flag.Float64("vad-threshold", 0.25, "порог голосовой активности от 0 до 1")
+	wakeThreshold := flag.Float64("wake-threshold", 0.35, "порог Hey Jarvis от 0 до 1")
+	vadThreshold := flag.Float64("vad-threshold", 0, "порог голосовой активности от 0 до 1; 0 отключает VAD")
 	wakeDebug := flag.Bool("wake-debug", false, "показывать максимальный wake score раз в секунду")
 	flag.Parse()
 
@@ -32,7 +32,7 @@ func main() {
 
 	var err error
 	switch *mode {
-	case "wake":
+	case "wake", "wake-test":
 		assets, assetsErr := resolveWakeAssets(*wakeAssets)
 		if assetsErr != nil {
 			err = assetsErr
@@ -42,7 +42,8 @@ func main() {
 			AssetsDir:      assets,
 			Threshold:      float32(*wakeThreshold),
 			VADThreshold:   float32(*vadThreshold),
-			Debug:          *wakeDebug,
+			Debug:          *wakeDebug || *mode == "wake-test",
+			TestOnly:       *mode == "wake-test",
 			SessionTimeout: *timeout,
 		})
 	case "voice":
@@ -70,7 +71,7 @@ func main() {
 		err = client.RunText(sessionCtx, command)
 		cancel()
 	default:
-		err = fmt.Errorf("неизвестный режим %q: используй wake, voice или text", *mode)
+		err = fmt.Errorf("неизвестный режим %q: используй wake, wake-test, voice или text", *mode)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Ошибка:", err)

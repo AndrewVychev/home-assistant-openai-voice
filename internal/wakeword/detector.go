@@ -24,6 +24,7 @@ type Detector struct {
 	engine      *openwakeword.Engine
 	threshold   float32
 	environment bool
+	pending     []byte
 	mu          sync.Mutex
 }
 
@@ -91,6 +92,37 @@ func (detector *Detector) ProcessPCM16(data []byte) (detected bool, score float3
 	if len(data)%2 != 0 {
 		return false, 0, errors.New("PCM16 chunk имеет нечётную длину")
 	}
+	detector.mu.Lock()
+	defer detector.mu.Unlock()
+	if detector.engine == nil {
+		return false, 0, errors.New("wake detector закрыт")
+	}
+
+	// openWakeWord is trained and documented around 80 ms (1280 sample)
+	// inference frames. The microphone callback normally delivers 20 ms chunks,
+	// so buffer them here. This also keeps the optional VAD on the same timeline
+	// as the wake-word feature extractor instead of scoring partial frames.
+	detector.pending = append(detector.pending, data...)
+	const frameBytes = openwakeword.FrameSamples * 2
+	for len(detector.pending) >= frameBytes {
+		frame := detector.pending[:frameBytes]
+		samples := pcm16Samples(frame)
+		scores, predictErr := detector.engine.Predict(samples)
+		if predictErr != nil {
+			return false, score, predictErr
+		}
+		if current := scores[ModelName]; current > score {
+			score = current
+		}
+		detector.pending = detector.pending[frameBytes:]
+	}
+	if len(detector.pending) == 0 {
+		detector.pending = detector.pending[:0]
+	}
+	return score >= detector.threshold, score, nil
+}
+
+func pcm16Samples(data []byte) openwakeword.Samples {
 	samples := make(openwakeword.Samples, len(data)/2)
 	for index := range samples {
 		value := int16(binary.LittleEndian.Uint16(data[index*2:]))
@@ -100,17 +132,7 @@ func (detector *Detector) ProcessPCM16(data []byte) (detected bool, score float3
 			samples[index] = float32(value) / 32767
 		}
 	}
-	detector.mu.Lock()
-	defer detector.mu.Unlock()
-	if detector.engine == nil {
-		return false, 0, errors.New("wake detector закрыт")
-	}
-	scores, err := detector.engine.Predict(samples)
-	if err != nil {
-		return false, 0, err
-	}
-	score = scores[ModelName]
-	return score >= detector.threshold, score, nil
+	return samples
 }
 
 func (detector *Detector) Reset() {
@@ -118,6 +140,7 @@ func (detector *Detector) Reset() {
 	defer detector.mu.Unlock()
 	if detector.engine != nil {
 		detector.engine.Reset()
+		detector.pending = detector.pending[:0]
 	}
 }
 

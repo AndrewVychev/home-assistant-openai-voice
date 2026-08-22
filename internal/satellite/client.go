@@ -3,10 +3,12 @@ package satellite
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"strings"
 	"sync"
@@ -27,6 +29,7 @@ type WakeConfig struct {
 	Threshold      float32
 	VADThreshold   float32
 	Debug          bool
+	TestOnly       bool
 	SessionTimeout time.Duration
 }
 
@@ -140,12 +143,19 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 	}
 	defer detector.Close()
 
+	detections := 0
 	for {
 		if err := client.waitForWake(ctx, detector, config.Debug); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return err
+		}
+		if config.TestOnly {
+			detections++
+			fprintf(client.Output, "Тест: успешных срабатываний %d. Продолжаю слушать…\n", detections)
+			detector.Reset()
+			continue
 		}
 		sessionCtx := ctx
 		cancel := func() {}
@@ -173,11 +183,15 @@ func (client Client) waitForWake(ctx context.Context, detector *wakeword.Detecto
 	fprintf(client.Output, "Жду: «Хей, Джарвис»…\n")
 	debugStarted := time.Now()
 	var debugMaximum float32
+	debugPeakDBFS := -96.0
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case chunk := <-audio.Input():
+			if debug {
+				debugPeakDBFS = max(debugPeakDBFS, pcmPeakDBFS(chunk))
+			}
 			detected, score, err := detector.ProcessPCM16(chunk)
 			if err != nil {
 				return fmt.Errorf("wake inference: %w", err)
@@ -194,13 +208,31 @@ func (client Client) waitForWake(ctx context.Context, detector *wakeword.Detecto
 					debugMaximum = score
 				}
 				if time.Since(debugStarted) >= time.Second {
-					fprintf(client.Output, "wake max score: %.3f\n", debugMaximum)
+					fprintf(client.Output, "mic peak: %.1f dBFS · wake max: %.3f\n", debugPeakDBFS, debugMaximum)
 					debugMaximum = 0
+					debugPeakDBFS = -96
 					debugStarted = time.Now()
 				}
 			}
 		}
 	}
+}
+
+func pcmPeakDBFS(data []byte) float64 {
+	var peak int32
+	for offset := 0; offset+1 < len(data); offset += 2 {
+		value := int32(int16(binary.LittleEndian.Uint16(data[offset:])))
+		if value < 0 {
+			value = -value
+		}
+		if value > peak {
+			peak = value
+		}
+	}
+	if peak == 0 {
+		return -96
+	}
+	return 20 * math.Log10(float64(peak)/32768)
 }
 
 func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn, audio *Audio) error {

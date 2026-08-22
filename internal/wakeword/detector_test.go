@@ -23,18 +23,20 @@ func TestOfficialHeyJarvisModelSuppressesSilence(t *testing.T) {
 	if assets == "" {
 		t.Skip("set HOMEVOICE_WAKE_ASSETS to run ONNX integration test")
 	}
-	detector, err := New(Config{AssetsDir: assets, Threshold: 0.50, VADThreshold: 0.25})
+	detector, err := New(Config{AssetsDir: assets, Threshold: 0.35, VADThreshold: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer detector.Close()
-	for frame := 0; frame < 30; frame++ {
-		detected, score, err := detector.ProcessPCM16(make([]byte, 1280*2))
+	// Real microphone callbacks arrive every 20 ms (320 samples). The detector
+	// must aggregate four callbacks into each 80 ms openWakeWord frame.
+	for chunk := 0; chunk < 120; chunk++ {
+		detected, score, err := detector.ProcessPCM16(make([]byte, 320*2))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if detected || score != 0 {
-			t.Fatalf("silence must be suppressed, detected=%v score=%f", detected, score)
+		if detected || score >= 0.01 {
+			t.Fatalf("silence score must stay negligible, detected=%v score=%f", detected, score)
 		}
 	}
 }
