@@ -103,7 +103,7 @@ func openAISessionUpdate(model, voice string, config SessionConfig) map[string]a
 			"silence_duration_ms": 500, "create_response": true, "interrupt_response": true,
 		},
 		"transcription": map[string]any{
-			"model": "gpt-4o-mini-transcribe", "language": "ru",
+			"model": "gpt-transcribe", "language": "ru",
 		},
 	}
 	audio := map[string]any{"input": input}

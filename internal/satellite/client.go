@@ -54,6 +54,10 @@ type sessionMetrics struct {
 	audioBytes atomic.Int64
 }
 
+// Half a second is enough to restore a command prefix consumed by wake-word
+// detection without replaying the entire wake phrase as a separate speech turn.
+const wakePreRollBytes = captureRate * pcmBytes / 2
+
 func (metrics *sessionMetrics) audioDuration() time.Duration {
 	return time.Duration(float64(metrics.audioBytes.Load()) / float64(captureRate*pcmBytes) * float64(time.Second))
 }
@@ -86,10 +90,10 @@ func (client Client) RunText(ctx context.Context, command string) error {
 }
 
 func (client Client) RunVoice(ctx context.Context) error {
-	return client.runVoice(ctx, nil)
+	return client.runVoice(ctx, nil, nil)
 }
 
-func (client Client) runVoice(ctx context.Context, audio *Audio) error {
+func (client Client) runVoice(ctx context.Context, audio *Audio, preRoll []byte) error {
 	connection, err := client.connect(ctx, "audio")
 	if err != nil {
 		return err
@@ -115,7 +119,7 @@ func (client Client) runVoice(ctx context.Context, audio *Audio) error {
 			return fmt.Errorf("запуск аудио: %w", err)
 		}
 	}
-	buffered := audio.BufferedDuration()
+	buffered := audio.BufferedDuration() + pcmDuration(len(preRoll))
 	if buffered > 0 {
 		fprintf(client.Output, "Аудио: в буфере после wake ~%.2f с\n", buffered.Seconds())
 	}
@@ -126,6 +130,15 @@ func (client Client) runVoice(ctx context.Context, audio *Audio) error {
 	writerErrors := make(chan error, 1)
 	metrics := &sessionMetrics{}
 	go func() {
+		if len(preRoll) > 0 {
+			metrics.audioBytes.Add(int64(len(preRoll)))
+			if err := wsjson.Write(writeCtx, connection, outbound{
+				Type: "audio", Data: base64.StdEncoding.EncodeToString(preRoll),
+			}); err != nil {
+				writerErrors <- err
+				return
+			}
+		}
 		for {
 			select {
 			case <-writeCtx.Done():
@@ -179,7 +192,7 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 
 	detections := 0
 	for {
-		audio, wakeErr := client.waitForWake(ctx, detector, config.Debug)
+		audio, preRoll, wakeErr := client.waitForWake(ctx, detector, config.Debug)
 		if wakeErr != nil {
 			if ctx.Err() != nil || errors.Is(wakeErr, context.Canceled) {
 				return nil
@@ -200,7 +213,7 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 		if config.SessionTimeout > 0 {
 			sessionCtx, cancel = context.WithTimeout(ctx, config.SessionTimeout)
 		}
-		err := client.runVoice(sessionCtx, audio)
+		err := client.runVoice(sessionCtx, audio, preRoll)
 		cancel()
 		audio.Close()
 		if ctx.Err() != nil {
@@ -215,36 +228,38 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 	}
 }
 
-func (client Client) waitForWake(ctx context.Context, detector wakeword.StreamDetector, debug bool) (*Audio, error) {
+func (client Client) waitForWake(ctx context.Context, detector wakeword.StreamDetector, debug bool) (*Audio, []byte, error) {
 	audio, err := NewAudio()
 	if err != nil {
-		return nil, fmt.Errorf("wake audio: %w", err)
+		return nil, nil, fmt.Errorf("wake audio: %w", err)
 	}
 	if err := audio.Start(); err != nil {
 		audio.Close()
-		return nil, fmt.Errorf("wake audio start: %w", err)
+		return nil, nil, fmt.Errorf("wake audio start: %w", err)
 	}
 	fprintf(client.Output, "Жду: «%s»…\n", detector.Phrase())
 	debugStarted := time.Now()
 	var debugMaximum float32
 	debugPeakDBFS := -96.0
+	preRoll := make([]byte, 0, wakePreRollBytes)
 	for {
 		select {
 		case <-ctx.Done():
 			audio.Close()
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case chunk := <-audio.Input():
+			preRoll = appendPCMPreRoll(preRoll, chunk, wakePreRollBytes)
 			if debug {
 				debugPeakDBFS = max(debugPeakDBFS, pcmPeakDBFS(chunk))
 			}
 			detected, score, err := detector.ProcessPCM16(chunk)
 			if err != nil {
 				audio.Close()
-				return nil, fmt.Errorf("wake inference: %w", err)
+				return nil, nil, fmt.Errorf("wake inference: %w", err)
 			}
 			if detected {
 				fprintf(client.Output, "Wake word услышан · score %.3f\n", score)
-				return audio, nil
+				return audio, preRoll, nil
 			}
 			if debug {
 				if score > debugMaximum {
@@ -259,6 +274,25 @@ func (client Client) waitForWake(ctx context.Context, detector wakeword.StreamDe
 			}
 		}
 	}
+}
+
+func appendPCMPreRoll(buffer, chunk []byte, limit int) []byte {
+	if limit <= 0 {
+		return nil
+	}
+	if len(chunk) >= limit {
+		return append(buffer[:0], chunk[len(chunk)-limit:]...)
+	}
+	overflow := len(buffer) + len(chunk) - limit
+	if overflow > 0 {
+		copy(buffer, buffer[overflow:])
+		buffer = buffer[:len(buffer)-overflow]
+	}
+	return append(buffer, chunk...)
+}
+
+func pcmDuration(bytes int) time.Duration {
+	return time.Duration(float64(bytes) / float64(captureRate*pcmBytes) * float64(time.Second))
 }
 
 func pcmPeakDBFS(data []byte) float64 {

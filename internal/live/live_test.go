@@ -45,6 +45,9 @@ func TestOpenAISessionUpdateUsesRealtimeAudioAndRussianTranscription(t *testing.
 	if transcription["language"] != "ru" {
 		t.Fatalf("transcription = %#v", transcription)
 	}
+	if transcription["model"] != "gpt-transcribe" {
+		t.Fatalf("transcription model = %#v", transcription["model"])
+	}
 	if _, exists := transcription["prompt"]; exists {
 		t.Fatalf("device vocabulary must not be sent as transcription prompt: %#v", transcription)
 	}

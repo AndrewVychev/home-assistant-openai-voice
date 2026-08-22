@@ -2,6 +2,20 @@ package satellite
 
 import "testing"
 
+func TestAppendPCMPreRollKeepsNewestAudio(t *testing.T) {
+	buffer := appendPCMPreRoll(nil, []byte{1, 2, 3}, 5)
+	buffer = appendPCMPreRoll(buffer, []byte{4, 5, 6}, 5)
+	want := []byte{2, 3, 4, 5, 6}
+	if string(buffer) != string(want) {
+		t.Fatalf("pre-roll = %v, want %v", buffer, want)
+	}
+	buffer = appendPCMPreRoll(buffer, []byte{7, 8, 9, 10, 11, 12}, 5)
+	want = []byte{8, 9, 10, 11, 12}
+	if string(buffer) != string(want) {
+		t.Fatalf("pre-roll after large chunk = %v, want %v", buffer, want)
+	}
+}
+
 func TestRequestsClarification(t *testing.T) {
 	tests := []struct {
 		response string
