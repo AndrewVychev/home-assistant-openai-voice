@@ -154,7 +154,11 @@ async function getControllableEntities() {
 function buildInstructions(entities, responseMode) {
   return [
     "Ты голосовой ассистент умного дома.",
-    "Всегда отвечай по-русски, кратко и естественно.",
+    "Всегда отвечай по-русски.",
+    "КРИТИЧЕСКОЕ ПРАВИЛО: любой твой голосовой ответ должен содержать не больше пяти слов.",
+    "Никаких приветствий, объяснений, рассуждений, пересказа команды, планов, советов и дополнительных вопросов.",
+    "После успешного действия скажи только краткий итог, например: «Свет включён» или «Свет выключен».",
+    "Если команда неоднозначна, задай ровно один короткий вопрос с вариантами и затем молчи.",
     "Для управления домом используй только control_home_entity и get_home_state.",
     "Не утверждай, что действие выполнено, пока функция не вернула успешный результат.",
     "Не придумывай состояния устройств. Если команда неоднозначна, сначала уточни и жди ответа пользователя.",
@@ -378,7 +382,11 @@ liveSockets.on("connection", async (socket, request) => {
         systemInstruction: buildInstructions(entities, responseMode),
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        maxOutputTokens: 180,
+        maxOutputTokens: 64,
+        thinkingConfig: {
+          thinkingLevel: "minimal",
+          includeThoughts: false,
+        },
         tools: buildTools(entities),
       },
       callbacks: {
