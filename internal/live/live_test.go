@@ -27,7 +27,7 @@ func TestGeminiToolsPreserveGenericSchema(t *testing.T) {
 }
 
 func TestOpenAISessionUpdateUsesRealtimeAudioAndRussianTranscription(t *testing.T) {
-	update := openAISessionUpdate("gpt-realtime-2.1-mini", "marin", SessionConfig{
+	update := openAISessionUpdate("gpt-realtime-2.1-mini", "marin", "gpt-4o-mini-transcribe", SessionConfig{
 		Instructions: "Коротко", ResponseMode: "audio", Vocabulary: []string{"включи", "выключи"},
 		Tools: []Tool{{Name: "control", Parameters: map[string]any{"type": "object"}}},
 	})
@@ -45,7 +45,7 @@ func TestOpenAISessionUpdateUsesRealtimeAudioAndRussianTranscription(t *testing.
 	if transcription["language"] != "ru" {
 		t.Fatalf("transcription = %#v", transcription)
 	}
-	if transcription["model"] != "gpt-transcribe" {
+	if transcription["model"] != "gpt-4o-mini-transcribe" {
 		t.Fatalf("transcription model = %#v", transcription["model"])
 	}
 	if _, exists := transcription["prompt"]; exists {

@@ -22,18 +22,20 @@ import (
 )
 
 type OpenAIProvider struct {
-	apiKey string
-	model  string
-	voice  string
-	url    string
+	apiKey             string
+	model              string
+	voice              string
+	transcriptionModel string
+	url                string
 }
 
-func NewOpenAI(apiKey, model, voice string) *OpenAIProvider {
+func NewOpenAI(apiKey, model, voice, transcriptionModel string) *OpenAIProvider {
 	return &OpenAIProvider{
-		apiKey: strings.TrimSpace(apiKey),
-		model:  strings.TrimSpace(model),
-		voice:  strings.TrimSpace(voice),
-		url:    "wss://api.openai.com/v1/realtime",
+		apiKey:             strings.TrimSpace(apiKey),
+		model:              strings.TrimSpace(model),
+		voice:              strings.TrimSpace(voice),
+		transcriptionModel: strings.TrimSpace(transcriptionModel),
+		url:                "wss://api.openai.com/v1/realtime",
 	}
 }
 
@@ -72,7 +74,7 @@ func (provider *OpenAIProvider) Connect(ctx context.Context, config SessionConfi
 	if created.Type != "session.created" {
 		return fail(fmt.Errorf("OpenAI Realtime: ожидался session.created, получено %s", created.Type))
 	}
-	if err := session.send(openAISessionUpdate(provider.model, provider.voice, config)); err != nil {
+	if err := session.send(openAISessionUpdate(provider.model, provider.voice, provider.transcriptionModel, config)); err != nil {
 		return fail(err)
 	}
 	for {
@@ -90,7 +92,7 @@ func (provider *OpenAIProvider) Connect(ctx context.Context, config SessionConfi
 	return session, nil
 }
 
-func openAISessionUpdate(model, voice string, config SessionConfig) map[string]any {
+func openAISessionUpdate(model, voice, transcriptionModel string, config SessionConfig) map[string]any {
 	mode := "audio"
 	if config.ResponseMode == "text" {
 		mode = "text"
@@ -103,7 +105,7 @@ func openAISessionUpdate(model, voice string, config SessionConfig) map[string]a
 			"silence_duration_ms": 500, "create_response": true, "interrupt_response": true,
 		},
 		"transcription": map[string]any{
-			"model": "gpt-transcribe", "language": "ru",
+			"model": transcriptionModel, "language": "ru",
 		},
 	}
 	audio := map[string]any{"input": input}

@@ -23,7 +23,7 @@ func TestTranscriptionVocabularyContainsRussianCommandsAndEntities(t *testing.T)
 
 func TestInstructionsRejectUncertainForeignTranscript(t *testing.T) {
 	instructions := buildInstructions(nil, "audio", nil)
-	for _, phrase := range []string{"только как русскую речь", "нерусскую или сомнительную", "turn_on", "turn_off", "ровно значение confirmation", "Обычные вопросы"} {
+	for _, phrase := range []string{"только как русскую речь", "нерусскую или сомнительную", "turn_on", "turn_off", "ровно значение confirmation", "gachi-стиле", "Обычные вопросы"} {
 		if !strings.Contains(instructions, phrase) {
 			t.Fatalf("instructions do not contain %q", phrase)
 		}
@@ -71,7 +71,7 @@ func TestToolResultForModelUsesExactConfirmationAndDropsRecoveryStatus(t *testin
 	}
 
 	result := toolResultForModel(call, payload, nil)
-	if result["confirmation"] != "Кондиционер включён." {
+	if result["confirmation"] != "Кондиционер включён, босс." {
 		t.Fatalf("unexpected confirmation: %#v", result["confirmation"])
 	}
 	if _, exists := result["recoveredFromStatus"]; exists {
@@ -117,7 +117,7 @@ func TestToolResultForModelUsesExactWeatherConfirmation(t *testing.T) {
 		"temperature": 14.4, "temperatureUnit": "°C", "humidity": 87.0,
 	}
 	result := toolResultForModel(call, payload, nil)
-	if result["confirmation"] != "Сейчас ясно, 14.4 °C." {
+	if result["confirmation"] != "Сейчас ясно, 14.4 °C, босс." {
 		t.Fatalf("unexpected weather confirmation: %#v", result)
 	}
 }

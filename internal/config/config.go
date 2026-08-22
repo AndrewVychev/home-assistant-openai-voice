@@ -9,16 +9,17 @@ import (
 )
 
 type Config struct {
-	Host            string
-	Port            int
-	HAURL           string
-	HAToken         string
-	DefaultProvider string
-	GeminiAPIKey    string
-	GeminiModel     string
-	OpenAIAPIKey    string
-	OpenAIModel     string
-	OpenAIVoice     string
+	Host                     string
+	Port                     int
+	HAURL                    string
+	HAToken                  string
+	DefaultProvider          string
+	GeminiAPIKey             string
+	GeminiModel              string
+	OpenAIAPIKey             string
+	OpenAIModel              string
+	OpenAIVoice              string
+	OpenAITranscriptionModel string
 }
 
 func Load() (Config, error) {
@@ -28,16 +29,17 @@ func Load() (Config, error) {
 		return Config{}, errors.New("PORT должен быть числом от 1 до 65535")
 	}
 	config := Config{
-		Host:            valueOrDefault("HOST", "127.0.0.1"),
-		Port:            port,
-		HAURL:           strings.TrimRight(valueOrDefault("HA_URL", "http://homeassistant.local"), "/"),
-		HAToken:         strings.TrimSpace(os.Getenv("HA_TOKEN")),
-		DefaultProvider: strings.ToLower(valueOrDefault("VOICE_PROVIDER", "gemini")),
-		GeminiAPIKey:    strings.TrimSpace(os.Getenv("GEMINI_API_KEY")),
-		GeminiModel:     valueOrDefault("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview"),
-		OpenAIAPIKey:    strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
-		OpenAIModel:     valueOrDefault("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1-mini"),
-		OpenAIVoice:     valueOrDefault("OPENAI_VOICE", "marin"),
+		Host:                     valueOrDefault("HOST", "127.0.0.1"),
+		Port:                     port,
+		HAURL:                    strings.TrimRight(valueOrDefault("HA_URL", "http://homeassistant.local"), "/"),
+		HAToken:                  strings.TrimSpace(os.Getenv("HA_TOKEN")),
+		DefaultProvider:          strings.ToLower(valueOrDefault("VOICE_PROVIDER", "gemini")),
+		GeminiAPIKey:             strings.TrimSpace(os.Getenv("GEMINI_API_KEY")),
+		GeminiModel:              valueOrDefault("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview"),
+		OpenAIAPIKey:             strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
+		OpenAIModel:              valueOrDefault("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1-mini"),
+		OpenAIVoice:              valueOrDefault("OPENAI_VOICE", "marin"),
+		OpenAITranscriptionModel: valueOrDefault("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
 	}
 	if config.DefaultProvider != "gemini" && config.DefaultProvider != "openai" {
 		return Config{}, errors.New("VOICE_PROVIDER должен быть gemini или openai")

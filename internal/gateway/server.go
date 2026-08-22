@@ -61,7 +61,7 @@ func New(cfg config.Config, logger *log.Logger) *Server {
 		logger: logger,
 		providers: map[string]liveapi.Provider{
 			"gemini": liveapi.NewGemini(cfg.GeminiAPIKey, cfg.GeminiModel),
-			"openai": liveapi.NewOpenAI(cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIVoice),
+			"openai": liveapi.NewOpenAI(cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIVoice, cfg.OpenAITranscriptionModel),
 		},
 		recentTarget: make(map[string]recentTarget),
 	}
@@ -402,9 +402,9 @@ func weatherConfirmation(payload map[string]any) string {
 		if unit == "" {
 			unit = "°C"
 		}
-		return fmt.Sprintf("Сейчас %s, %.1f %s.", condition, temperature, unit)
+		return fmt.Sprintf("Сейчас %s, %.1f %s, босс.", condition, temperature, unit)
 	}
-	return "Сейчас " + condition + "."
+	return "Сейчас " + condition + ", босс."
 }
 
 func weatherCondition(condition string) string {
@@ -434,18 +434,18 @@ func actionConfirmation(entityID, action string, temperature any) string {
 	}
 	switch action {
 	case "turn_on":
-		return device + " включён."
+		return device + " включён, босс."
 	case "turn_off":
-		return device + " выключен."
+		return device + " выключен, босс."
 	case "toggle":
-		return device + " переключён."
+		return device + " переключён, босс."
 	case "set_temperature":
 		if value, ok := temperature.(float64); ok {
-			return fmt.Sprintf("Установлено %.0f градусов.", value)
+			return fmt.Sprintf("Установлено %.0f градусов, босс.", value)
 		}
-		return "Температура установлена."
+		return "Температура установлена, босс."
 	default:
-		return "Действие выполнено."
+		return "Действие выполнено, босс."
 	}
 }
 
@@ -493,6 +493,7 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string, rec
 		"Никогда не превращай нерусскую или сомнительную расшифровку в команду умного дома: попроси повторить.",
 		"Строго различай противоположные команды: включи означает только turn_on, выключи или отключи означает только turn_off.",
 		"Любой ответ содержит не больше пяти слов.",
+		"Говори в пародийном gachi-стиле: брутально, энергично и с лёгкими мемными обращениями вроде «босс», но без сексуальных подробностей; это правило не изменяет значение confirmation.",
 		"Никаких приветствий, объяснений, планов, советов и лишних вопросов.",
 		"Никогда не сообщай о намерении перед вызовом функции: сразу вызывай функцию без текста.",
 		"После результата любой функции с ok=true и полем confirmation " + verb + " ровно значение confirmation без изменений и ничего больше.",
