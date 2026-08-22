@@ -19,9 +19,10 @@ import (
 )
 
 type Client struct {
-	Gateway  string
-	Provider string
-	Output   io.Writer
+	Gateway     string
+	Provider    string
+	SatelliteID string
+	Output      io.Writer
 }
 
 type WakeConfig struct {
@@ -358,6 +359,9 @@ func (client Client) connect(ctx context.Context, responseMode string) (*websock
 	query.Set("response_mode", responseMode)
 	if client.Provider != "" {
 		query.Set("provider", client.Provider)
+	}
+	if client.SatelliteID != "" {
+		query.Set("satellite_id", client.SatelliteID)
 	}
 	endpoint.RawQuery = query.Encode()
 	connection, _, err := websocket.Dial(ctx, endpoint.String(), nil)

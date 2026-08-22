@@ -21,10 +21,20 @@ import (
 )
 
 type Server struct {
-	config    config.Config
-	home      *homeassistant.Client
-	logger    *log.Logger
-	providers map[string]liveapi.Provider
+	config       config.Config
+	home         *homeassistant.Client
+	logger       *log.Logger
+	providers    map[string]liveapi.Provider
+	recentMu     sync.Mutex
+	recentTarget map[string]recentTarget
+}
+
+const recentTargetTTL = 10 * time.Minute
+
+type recentTarget struct {
+	EntityID  string
+	Name      string
+	ExpiresAt time.Time
 }
 
 type clientEvent struct {
@@ -53,6 +63,7 @@ func New(cfg config.Config, logger *log.Logger) *Server {
 			"gemini": liveapi.NewGemini(cfg.GeminiAPIKey, cfg.GeminiModel),
 			"openai": liveapi.NewOpenAI(cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIVoice),
 		},
+		recentTarget: make(map[string]recentTarget),
 	}
 }
 
@@ -161,9 +172,17 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 	if responseMode != "text" {
 		responseMode = "audio"
 	}
+	satelliteID := strings.TrimSpace(request.URL.Query().Get("satellite_id"))
+	if satelliteID == "" {
+		satelliteID = "browser"
+	}
+	if len(satelliteID) > 64 {
+		satelliteID = satelliteID[:64]
+	}
+	recent := server.getRecentTarget(satelliteID, time.Now())
 
 	session, err := provider.Connect(ctx, liveapi.SessionConfig{
-		Instructions: buildInstructions(entities, responseMode),
+		Instructions: buildInstructions(entities, responseMode, recent),
 		ResponseMode: responseMode,
 		Tools:        buildTools(entities),
 		Vocabulary:   transcriptionVocabulary(entities),
@@ -199,7 +218,7 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 			}
 			return
 		}
-		server.relayMessage(ctx, writer, conversation, message, responseMode)
+		server.relayMessage(ctx, writer, conversation, message, responseMode, satelliteID)
 	}
 }
 
@@ -232,7 +251,7 @@ func (server *Server) readBrowser(ctx context.Context, connection *websocket.Con
 	}
 }
 
-func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, conversation *liveSession, event liveapi.Event, responseMode string) {
+func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, conversation *liveSession, event liveapi.Event, responseMode, satelliteID string) {
 	switch event.Kind {
 	case liveapi.EventInputTranscript:
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "text": event.Text})
@@ -246,7 +265,7 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, co
 			})
 		}
 	case liveapi.EventToolCall:
-		server.executeTools(ctx, writer, conversation, event.ToolCalls)
+		server.executeTools(ctx, writer, conversation, event.ToolCalls, satelliteID)
 	case liveapi.EventUsage:
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "usage": event.Usage})
 	case liveapi.EventTurnComplete:
@@ -258,7 +277,7 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, co
 	}
 }
 
-func (server *Server) executeTools(ctx context.Context, writer *socketWriter, conversation *liveSession, calls []liveapi.ToolCall) {
+func (server *Server) executeTools(ctx context.Context, writer *socketWriter, conversation *liveSession, calls []liveapi.ToolCall, satelliteID string) {
 	responses := make([]liveapi.ToolResult, 0, len(calls))
 	for _, call := range calls {
 		if call.Name != "control_home_entity" && call.Name != "get_home_state" {
@@ -280,6 +299,10 @@ func (server *Server) executeTools(ctx context.Context, writer *socketWriter, co
 			_ = json.Unmarshal(encoded, &payload)
 		}
 		writer.send(ctx, map[string]any{"type": "ha_result", "result": payload})
+		if err == nil && call.Name == "control_home_entity" {
+			name, _ := payload["name"].(string)
+			server.rememberTarget(satelliteID, entityID, name, time.Now())
+		}
 		response := toolResultForModel(call, payload, err)
 		responses = append(responses, liveapi.ToolResult{ID: call.ID, Name: call.Name, Output: response})
 	}
@@ -288,6 +311,31 @@ func (server *Server) executeTools(ctx context.Context, writer *socketWriter, co
 			writer.send(ctx, map[string]any{"type": "error", "message": err.Error()})
 		}
 	}
+}
+
+func (server *Server) rememberTarget(satelliteID, entityID, name string, now time.Time) {
+	if satelliteID == "" || entityID == "" {
+		return
+	}
+	server.recentMu.Lock()
+	defer server.recentMu.Unlock()
+	server.recentTarget[satelliteID] = recentTarget{
+		EntityID: entityID, Name: name, ExpiresAt: now.Add(recentTargetTTL),
+	}
+}
+
+func (server *Server) getRecentTarget(satelliteID string, now time.Time) *recentTarget {
+	server.recentMu.Lock()
+	defer server.recentMu.Unlock()
+	target, exists := server.recentTarget[satelliteID]
+	if !exists {
+		return nil
+	}
+	if !now.Before(target.ExpiresAt) {
+		delete(server.recentTarget, satelliteID)
+		return nil
+	}
+	return &target
 }
 
 func toolResultForModel(call liveapi.ToolCall, payload map[string]any, err error) map[string]any {
@@ -417,7 +465,7 @@ func transcriptionVocabulary(entities []homeassistant.Entity) []string {
 	return result
 }
 
-func buildInstructions(entities []homeassistant.Entity, responseMode string) string {
+func buildInstructions(entities []homeassistant.Entity, responseMode string, recent *recentTarget) string {
 	items := make([]string, 0, len(entities))
 	for _, entity := range entities {
 		area := entity.Area
@@ -430,7 +478,7 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 	if responseMode == "text" {
 		verb = "напиши"
 	}
-	return strings.Join([]string{
+	instructions := []string{
 		"Ты русскоязычный голосовой ассистент и управляешь умным домом.",
 		"Пользователь всегда говорит по-русски; распознавай вход только как русскую речь и всегда отвечай по-русски.",
 		"Никогда не превращай нерусскую или сомнительную расшифровку в команду умного дома: попроси повторить.",
@@ -452,7 +500,14 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 		"Для света в комнате выбирай сущность light этой комнаты.",
 		"Если подходящей сущности нет, ничего другого не включай.",
 		"Доступные сущности: " + strings.Join(items, "; ") + ".",
-	}, " ")
+	}
+	if recent != nil {
+		instructions = append(instructions,
+			fmt.Sprintf("Краткосрочный контекст: последняя успешно управляемая сущность — %s (%s).", recent.EntityID, recent.Name),
+			"Если новая команда опускает устройство и явно продолжает предыдущее действие словами вроде «а теперь», используй эту сущность; явно названное новое устройство всегда важнее.",
+		)
+	}
+	return strings.Join(instructions, " ")
 }
 
 func buildTools(entities []homeassistant.Entity) []liveapi.Tool {

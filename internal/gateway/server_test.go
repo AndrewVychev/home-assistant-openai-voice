@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"homevoice/internal/homeassistant"
 	liveapi "homevoice/internal/live"
@@ -21,10 +22,36 @@ func TestTranscriptionVocabularyContainsRussianCommandsAndEntities(t *testing.T)
 }
 
 func TestInstructionsRejectUncertainForeignTranscript(t *testing.T) {
-	instructions := buildInstructions(nil, "audio")
+	instructions := buildInstructions(nil, "audio", nil)
 	for _, phrase := range []string{"только как русскую речь", "нерусскую или сомнительную", "turn_on", "turn_off", "ровно значение confirmation", "Обычные вопросы"} {
 		if !strings.Contains(instructions, phrase) {
 			t.Fatalf("instructions do not contain %q", phrase)
+		}
+	}
+}
+
+func TestRecentTargetIsScopedAndExpires(t *testing.T) {
+	server := &Server{recentTarget: make(map[string]recentTarget)}
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	server.rememberTarget("living-room", "light.hall", "Зал главный свет", now)
+
+	target := server.getRecentTarget("living-room", now.Add(5*time.Minute))
+	if target == nil || target.EntityID != "light.hall" {
+		t.Fatalf("recent target missing: %#v", target)
+	}
+	if other := server.getRecentTarget("kitchen", now.Add(5*time.Minute)); other != nil {
+		t.Fatalf("target leaked across satellites: %#v", other)
+	}
+	if expired := server.getRecentTarget("living-room", now.Add(11*time.Minute)); expired != nil {
+		t.Fatalf("expired target returned: %#v", expired)
+	}
+}
+
+func TestInstructionsIncludeRecentTarget(t *testing.T) {
+	instructions := buildInstructions(nil, "audio", &recentTarget{EntityID: "light.hall", Name: "Зал главный свет"})
+	for _, phrase := range []string{"light.hall", "Зал главный свет", "а теперь"} {
+		if !strings.Contains(instructions, phrase) {
+			t.Fatalf("instructions do not contain recent context %q", phrase)
 		}
 	}
 }

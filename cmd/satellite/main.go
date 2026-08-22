@@ -20,6 +20,7 @@ func main() {
 	mode := flag.String("mode", "wake", "wake, wake-test, voice или text")
 	gateway := flag.String("gateway", "ws://127.0.0.1:3000/live", "WebSocket URL Go gateway")
 	provider := flag.String("provider", envOr("VOICE_PROVIDER", "gemini"), "voice provider: gemini или openai")
+	satelliteID := flag.String("satellite-id", envOr("HOMEVOICE_SATELLITE_ID", "local"), "стабильное имя микрофона для краткосрочного контекста")
 	timeout := flag.Duration("timeout", 45*time.Second, "максимальная длительность одной сессии")
 	wakeEngine := flag.String("wake-engine", envOr("HOMEVOICE_WAKE_ENGINE", "micro"), "wake engine: micro (Куза) или openwakeword (Hey Jarvis)")
 	wakeAssets := flag.String("wake-assets", "", "каталог моделей выбранного wake engine")
@@ -35,7 +36,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Ошибка: неизвестный provider %q: используй gemini или openai\n", *provider)
 		os.Exit(1)
 	}
-	client := satellite.Client{Gateway: *gateway, Provider: *provider, Output: os.Stdout}
+	client := satellite.Client{Gateway: *gateway, Provider: *provider, SatelliteID: strings.TrimSpace(*satelliteID), Output: os.Stdout}
 
 	var err error
 	switch *mode {
