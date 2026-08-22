@@ -29,7 +29,9 @@ type Audio struct {
 
 func NewAudio() (*Audio, error) {
 	audio := &Audio{
-		input: make(chan []byte, 64),
+		// Keep about five seconds of microphone audio while a Live session connects.
+		// This lets the user say the wake word and command as one continuous phrase.
+		input: make(chan []byte, 256),
 		queue: newPCMQueue(playbackRate * pcmBytes * 5),
 	}
 	context, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)

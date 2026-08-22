@@ -75,6 +75,10 @@ func (client Client) RunText(ctx context.Context, command string) error {
 }
 
 func (client Client) RunVoice(ctx context.Context) error {
+	return client.runVoice(ctx, nil)
+}
+
+func (client Client) runVoice(ctx context.Context, audio *Audio) error {
 	connection, err := client.connect(ctx, "audio")
 	if err != nil {
 		return err
@@ -90,13 +94,15 @@ func (client Client) RunVoice(ctx context.Context) error {
 	}
 	fprintf(client.Output, "Подключено: %s · %s\n", ready.Provider, ready.Model)
 
-	audio, err := NewAudio()
-	if err != nil {
-		return fmt.Errorf("аудио: %w", err)
-	}
-	defer audio.Close()
-	if err := audio.Start(); err != nil {
-		return fmt.Errorf("запуск аудио: %w", err)
+	if audio == nil {
+		audio, err = NewAudio()
+		if err != nil {
+			return fmt.Errorf("аудио: %w", err)
+		}
+		defer audio.Close()
+		if err := audio.Start(); err != nil {
+			return fmt.Errorf("запуск аудио: %w", err)
+		}
 	}
 	fprintf(client.Output, "Слушаю. Скажи команду…\n")
 
@@ -156,15 +162,17 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 
 	detections := 0
 	for {
-		if err := client.waitForWake(ctx, detector, config.Debug); err != nil {
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		audio, wakeErr := client.waitForWake(ctx, detector, config.Debug)
+		if wakeErr != nil {
+			if ctx.Err() != nil || errors.Is(wakeErr, context.Canceled) {
 				return nil
 			}
-			return err
+			return wakeErr
 		}
 		if config.TestOnly {
 			detections++
 			fprintf(client.Output, "Тест: успешных срабатываний %d. Продолжаю слушать…\n", detections)
+			audio.Close()
 			if err := detector.Reset(); err != nil {
 				return err
 			}
@@ -175,8 +183,9 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 		if config.SessionTimeout > 0 {
 			sessionCtx, cancel = context.WithTimeout(ctx, config.SessionTimeout)
 		}
-		err := client.RunVoice(sessionCtx)
+		err := client.runVoice(sessionCtx, audio)
 		cancel()
+		audio.Close()
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -189,14 +198,14 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 	}
 }
 
-func (client Client) waitForWake(ctx context.Context, detector wakeword.StreamDetector, debug bool) error {
+func (client Client) waitForWake(ctx context.Context, detector wakeword.StreamDetector, debug bool) (*Audio, error) {
 	audio, err := NewAudio()
 	if err != nil {
-		return fmt.Errorf("wake audio: %w", err)
+		return nil, fmt.Errorf("wake audio: %w", err)
 	}
-	defer audio.Close()
 	if err := audio.Start(); err != nil {
-		return fmt.Errorf("wake audio start: %w", err)
+		audio.Close()
+		return nil, fmt.Errorf("wake audio start: %w", err)
 	}
 	fprintf(client.Output, "Жду: «%s»…\n", detector.Phrase())
 	debugStarted := time.Now()
@@ -205,21 +214,20 @@ func (client Client) waitForWake(ctx context.Context, detector wakeword.StreamDe
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			audio.Close()
+			return nil, ctx.Err()
 		case chunk := <-audio.Input():
 			if debug {
 				debugPeakDBFS = max(debugPeakDBFS, pcmPeakDBFS(chunk))
 			}
 			detected, score, err := detector.ProcessPCM16(chunk)
 			if err != nil {
-				return fmt.Errorf("wake inference: %w", err)
+				audio.Close()
+				return nil, fmt.Errorf("wake inference: %w", err)
 			}
 			if detected {
-				audio.Listen(false)
 				fprintf(client.Output, "Wake word услышан · score %.3f\n", score)
-				audio.PlayWakeChime()
-				audio.WaitPlayback(time.Second)
-				return nil
+				return audio, nil
 			}
 			if debug {
 				if score > debugMaximum {
