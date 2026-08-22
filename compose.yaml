@@ -1,8 +1,6 @@
 services:
-  voice:
+  homevoice:
     build: .
-    ports:
-      - "127.0.0.1:3000:3000"
-    env_file:
-      - .env
+    env_file: .env
+    network_mode: host
     restart: unless-stopped

@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local Gemini Live voice prototype for Home Assistant",
+  "description": "Go gateway and diagnostic web client for Gemini Live and Home Assistant",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "test": "node --test"
+    "start": "go run ./cmd/gateway",
+    "test": "go test ./...",
+    "legacy:start": "node server.js",
+    "legacy:test": "node --test"
   },
   "engines": {
     "node": ">=20"
