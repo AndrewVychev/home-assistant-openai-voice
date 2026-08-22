@@ -9,6 +9,8 @@ const (
 	EventOutputTranscript EventKind = "output_transcript"
 	EventTextDelta        EventKind = "text_delta"
 	EventAudioDelta       EventKind = "audio_delta"
+	EventSpeechStarted    EventKind = "speech_started"
+	EventSpeechStopped    EventKind = "speech_stopped"
 	EventToolCall         EventKind = "tool_call"
 	EventUsage            EventKind = "usage"
 	EventInterrupted      EventKind = "interrupted"
@@ -43,6 +45,7 @@ type Event struct {
 	ToolCalls []ToolCall
 	Usage     any
 	Reason    string
+	AudioMS   int
 }
 
 type SessionConfig struct {

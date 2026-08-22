@@ -192,6 +192,7 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	conversation := &liveSession{session: session}
+	buffer := &responseBuffer{}
 	defer conversation.close()
 	writer.send(ctx, map[string]any{
 		"type": "ready", "provider": provider.ID(), "model": provider.Model(), "responseMode": responseMode,
@@ -218,7 +219,9 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 			}
 			return
 		}
-		server.relayMessage(ctx, writer, conversation, message, responseMode, satelliteID)
+		for _, deliver := range buffer.accept(message) {
+			server.relayMessage(ctx, writer, conversation, deliver, responseMode, satelliteID)
+		}
 	}
 }
 
@@ -264,6 +267,8 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, co
 				"mimeType": valueOr(event.MIMEType, "audio/pcm;rate=24000"),
 			})
 		}
+	case liveapi.EventSpeechStarted, liveapi.EventSpeechStopped:
+		writer.send(ctx, map[string]any{"type": string(event.Kind), "audioMs": event.AudioMS})
 	case liveapi.EventToolCall:
 		server.executeTools(ctx, writer, conversation, event.ToolCalls, satelliteID)
 	case liveapi.EventUsage:
@@ -274,6 +279,30 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, co
 		writer.send(ctx, map[string]any{"type": string(event.Kind)})
 	case liveapi.EventError:
 		writer.send(ctx, map[string]any{"type": "error", "message": event.Text})
+	}
+}
+
+type responseBuffer struct {
+	pending []liveapi.Event
+}
+
+func (buffer *responseBuffer) accept(event liveapi.Event) []liveapi.Event {
+	switch event.Kind {
+	case liveapi.EventOutputTranscript, liveapi.EventTextDelta, liveapi.EventAudioDelta:
+		buffer.pending = append(buffer.pending, event)
+		return nil
+	case liveapi.EventToolCall:
+		buffer.pending = nil
+		return []liveapi.Event{event}
+	case liveapi.EventTurnComplete:
+		deliver := append([]liveapi.Event(nil), buffer.pending...)
+		buffer.pending = nil
+		return append(deliver, event)
+	case liveapi.EventInterrupted, liveapi.EventError:
+		buffer.pending = nil
+		return []liveapi.Event{event}
+	default:
+		return []liveapi.Event{event}
 	}
 }
 

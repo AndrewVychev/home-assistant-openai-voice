@@ -101,6 +101,10 @@ func (audio *Audio) Input() <-chan []byte {
 	return audio.input
 }
 
+func (audio *Audio) BufferedDuration() time.Duration {
+	return time.Duration(len(audio.input)) * 20 * time.Millisecond
+}
+
 func (audio *Audio) Listen(enabled bool) {
 	audio.enabled.Store(enabled)
 }

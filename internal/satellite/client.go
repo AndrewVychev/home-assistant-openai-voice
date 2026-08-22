@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -46,6 +47,15 @@ type event struct {
 	Args     map[string]any `json:"args,omitempty"`
 	Result   map[string]any `json:"result,omitempty"`
 	Message  string         `json:"message,omitempty"`
+	AudioMS  int            `json:"audioMs,omitempty"`
+}
+
+type sessionMetrics struct {
+	audioBytes atomic.Int64
+}
+
+func (metrics *sessionMetrics) audioDuration() time.Duration {
+	return time.Duration(float64(metrics.audioBytes.Load()) / float64(captureRate*pcmBytes) * float64(time.Second))
 }
 
 type outbound struct {
@@ -72,7 +82,7 @@ func (client Client) RunText(ctx context.Context, command string) error {
 	if err := wsjson.Write(ctx, connection, outbound{Type: "text", Text: command}); err != nil {
 		return err
 	}
-	return client.receiveTurn(ctx, connection, nil)
+	return client.receiveTurn(ctx, connection, nil, &sessionMetrics{})
 }
 
 func (client Client) RunVoice(ctx context.Context) error {
@@ -105,11 +115,16 @@ func (client Client) runVoice(ctx context.Context, audio *Audio) error {
 			return fmt.Errorf("запуск аудио: %w", err)
 		}
 	}
+	buffered := audio.BufferedDuration()
+	if buffered > 0 {
+		fprintf(client.Output, "Аудио: в буфере после wake ~%.2f с\n", buffered.Seconds())
+	}
 	fprintf(client.Output, "Слушаю. Скажи команду…\n")
 
 	writeCtx, stopWriter := context.WithCancel(ctx)
 	defer stopWriter()
 	writerErrors := make(chan error, 1)
+	metrics := &sessionMetrics{}
 	go func() {
 		for {
 			select {
@@ -117,6 +132,7 @@ func (client Client) runVoice(ctx context.Context, audio *Audio) error {
 				writerErrors <- nil
 				return
 			case chunk := <-audio.Input():
+				metrics.audioBytes.Add(int64(len(chunk)))
 				err := wsjson.Write(writeCtx, connection, outbound{
 					Type: "audio",
 					Data: base64.StdEncoding.EncodeToString(chunk),
@@ -129,7 +145,7 @@ func (client Client) runVoice(ctx context.Context, audio *Audio) error {
 		}
 	}()
 
-	err = client.receiveTurn(ctx, connection, audio)
+	err = client.receiveTurn(ctx, connection, audio, metrics)
 	stopWriter()
 	select {
 	case writerErr := <-writerErrors:
@@ -262,7 +278,7 @@ func pcmPeakDBFS(data []byte) float64 {
 	return 20 * math.Log10(float64(peak)/32768)
 }
 
-func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn, audio *Audio) error {
+func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn, audio *Audio, metrics *sessionMetrics) error {
 	toolExecuted := false
 	mutedForReply := false
 	var textResponse strings.Builder
@@ -276,6 +292,10 @@ func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn
 			return err
 		}
 		switch message.Type {
+		case "speech_started":
+			fprintf(client.Output, "OpenAI VAD: речь началась · audio %d мс · отправлено %.2f с\n", message.AudioMS, metrics.audioDuration().Seconds())
+		case "speech_stopped":
+			fprintf(client.Output, "OpenAI VAD: речь закончилась · audio %d мс · отправлено %.2f с\n", message.AudioMS, metrics.audioDuration().Seconds())
 		case "input_transcript":
 			fprintf(client.Output, "Ты: %s\n", strings.TrimSpace(message.Text))
 		case "output_transcript":

@@ -146,6 +146,8 @@ type openAIRawEvent struct {
 	Name       string `json:"name"`
 	CallID     string `json:"call_id"`
 	Arguments  string `json:"arguments"`
+	AudioStart int    `json:"audio_start_ms"`
+	AudioEnd   int    `json:"audio_end_ms"`
 	Item       *struct {
 		Type      string `json:"type"`
 		Name      string `json:"name"`
@@ -195,6 +197,10 @@ func (session *openAISession) Receive() (Event, error) {
 			}
 		}
 		switch raw.Type {
+		case "input_audio_buffer.speech_started":
+			return Event{Kind: EventSpeechStarted, AudioMS: raw.AudioStart}, nil
+		case "input_audio_buffer.speech_stopped":
+			return Event{Kind: EventSpeechStopped, AudioMS: raw.AudioEnd}, nil
 		case "conversation.item.input_audio_transcription.completed":
 			if looksLikeTranscriptionPromptEcho(raw.Transcript) {
 				log.Printf("OpenAI transcription discarded probable prompt echo")

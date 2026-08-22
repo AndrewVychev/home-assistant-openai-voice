@@ -135,3 +135,29 @@ func TestToolResultForModelLeavesOrdinaryStateToModel(t *testing.T) {
 		t.Fatalf("ordinary state missing: %#v", result)
 	}
 }
+
+func TestResponseBufferDropsPreambleBeforeToolCall(t *testing.T) {
+	buffer := &responseBuffer{}
+	if delivered := buffer.accept(liveapi.Event{Kind: liveapi.EventOutputTranscript, Text: "Секунду, включаю"}); len(delivered) != 0 {
+		t.Fatalf("preamble delivered before tool decision: %#v", delivered)
+	}
+	if delivered := buffer.accept(liveapi.Event{Kind: liveapi.EventAudioDelta, Audio: []byte{1, 2}}); len(delivered) != 0 {
+		t.Fatalf("audio preamble delivered before tool decision: %#v", delivered)
+	}
+	delivered := buffer.accept(liveapi.Event{Kind: liveapi.EventToolCall})
+	if len(delivered) != 1 || delivered[0].Kind != liveapi.EventToolCall {
+		t.Fatalf("tool call not delivered: %#v", delivered)
+	}
+	if len(buffer.pending) != 0 {
+		t.Fatalf("preamble remains buffered: %#v", buffer.pending)
+	}
+}
+
+func TestResponseBufferReleasesOrdinaryAnswerAtTurnComplete(t *testing.T) {
+	buffer := &responseBuffer{}
+	buffer.accept(liveapi.Event{Kind: liveapi.EventTextDelta, Text: "Ответ"})
+	delivered := buffer.accept(liveapi.Event{Kind: liveapi.EventTurnComplete})
+	if len(delivered) != 2 || delivered[0].Text != "Ответ" || delivered[1].Kind != liveapi.EventTurnComplete {
+		t.Fatalf("ordinary response was not released in order: %#v", delivered)
+	}
+}
