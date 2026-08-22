@@ -1,7 +1,9 @@
 package satellite
 
 import (
+	"encoding/binary"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -103,6 +105,22 @@ func (audio *Audio) Listen(enabled bool) {
 
 func (audio *Audio) Play(data []byte) {
 	audio.queue.write(data)
+}
+
+func (audio *Audio) PlayWakeChime() {
+	const duration = 280 * time.Millisecond
+	samples := int(float64(playbackRate) * duration.Seconds())
+	data := make([]byte, samples*pcmBytes)
+	for index := 0; index < samples; index++ {
+		frequency := 660.0
+		if index > samples/2 {
+			frequency = 880
+		}
+		envelope := math.Sin(math.Pi * float64(index) / float64(samples))
+		value := int16(math.Sin(2*math.Pi*frequency*float64(index)/playbackRate) * envelope * 3500)
+		binary.LittleEndian.PutUint16(data[index*2:], uint16(value))
+	}
+	audio.Play(data)
 }
 
 func (audio *Audio) WaitPlayback(timeout time.Duration) {

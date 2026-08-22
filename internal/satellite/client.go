@@ -14,11 +14,19 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"homevoice/internal/wakeword"
 )
 
 type Client struct {
 	Gateway string
 	Output  io.Writer
+}
+
+type WakeConfig struct {
+	AssetsDir      string
+	Threshold      float32
+	VADThreshold   float32
+	SessionTimeout time.Duration
 }
 
 type event struct {
@@ -118,6 +126,68 @@ func (client Client) RunVoice(ctx context.Context) error {
 	case <-time.After(time.Second):
 	}
 	return err
+}
+
+func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
+	detector, err := wakeword.New(wakeword.Config{
+		AssetsDir:    config.AssetsDir,
+		Threshold:    config.Threshold,
+		VADThreshold: config.VADThreshold,
+	})
+	if err != nil {
+		return err
+	}
+	defer detector.Close()
+
+	for {
+		if err := client.waitForWake(ctx, detector); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+		sessionCtx := ctx
+		cancel := func() {}
+		if config.SessionTimeout > 0 {
+			sessionCtx, cancel = context.WithTimeout(ctx, config.SessionTimeout)
+		}
+		err := client.RunVoice(sessionCtx)
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			fprintf(client.Output, "Голосовая сессия: %v\n", err)
+		}
+		detector.Reset()
+	}
+}
+
+func (client Client) waitForWake(ctx context.Context, detector *wakeword.Detector) error {
+	audio, err := NewAudio()
+	if err != nil {
+		return fmt.Errorf("wake audio: %w", err)
+	}
+	defer audio.Close()
+	if err := audio.Start(); err != nil {
+		return fmt.Errorf("wake audio start: %w", err)
+	}
+	fprintf(client.Output, "Жду: «Хей, Джарвис»…\n")
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case chunk := <-audio.Input():
+			detected, score, err := detector.ProcessPCM16(chunk)
+			if err != nil {
+				return fmt.Errorf("wake inference: %w", err)
+			}
+			if detected {
+				audio.Listen(false)
+				fprintf(client.Output, "Wake word услышан · score %.3f\n", score)
+				audio.PlayWakeChime()
+				audio.WaitPlayback(time.Second)
+				return nil
+			}
+		}
+	}
 }
 
 func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn, audio *Audio) error {

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -15,21 +17,36 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "voice", "voice или text")
+	mode := flag.String("mode", "wake", "wake, voice или text")
 	gateway := flag.String("gateway", "ws://127.0.0.1:3000/gemini-live", "WebSocket URL Go gateway")
 	timeout := flag.Duration("timeout", 45*time.Second, "максимальная длительность одной сессии")
+	wakeAssets := flag.String("wake-assets", "", "каталог моделей и ONNX Runtime")
+	wakeThreshold := flag.Float64("wake-threshold", 0.70, "порог Hey Jarvis от 0 до 1")
+	vadThreshold := flag.Float64("vad-threshold", 0.50, "порог голосовой активности от 0 до 1")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(ctx, *timeout)
-	defer cancel()
 	client := satellite.Client{Gateway: *gateway, Output: os.Stdout}
 
 	var err error
 	switch *mode {
+	case "wake":
+		assets, assetsErr := resolveWakeAssets(*wakeAssets)
+		if assetsErr != nil {
+			err = assetsErr
+			break
+		}
+		err = client.RunWake(ctx, satellite.WakeConfig{
+			AssetsDir:      assets,
+			Threshold:      float32(*wakeThreshold),
+			VADThreshold:   float32(*vadThreshold),
+			SessionTimeout: *timeout,
+		})
 	case "voice":
-		err = client.RunVoice(ctx)
+		sessionCtx, cancel := context.WithTimeout(ctx, *timeout)
+		err = client.RunVoice(sessionCtx)
+		cancel()
 	case "text":
 		command := strings.TrimSpace(strings.Join(flag.Args(), " "))
 		if command == "" {
@@ -47,12 +64,45 @@ func main() {
 			err = fmt.Errorf("пустая команда")
 			break
 		}
-		err = client.RunText(ctx, command)
+		sessionCtx, cancel := context.WithTimeout(ctx, *timeout)
+		err = client.RunText(sessionCtx, command)
+		cancel()
 	default:
-		err = fmt.Errorf("неизвестный режим %q: используй voice или text", *mode)
+		err = fmt.Errorf("неизвестный режим %q: используй wake, voice или text", *mode)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Ошибка:", err)
 		os.Exit(1)
 	}
+}
+
+func resolveWakeAssets(configured string) (string, error) {
+	if configured == "" {
+		configured = strings.TrimSpace(os.Getenv("HOMEVOICE_WAKE_ASSETS"))
+	}
+	candidates := make([]string, 0, 3)
+	if configured != "" {
+		candidates = append(candidates, configured)
+	} else {
+		candidates = append(candidates, "wakeword")
+		if executable, err := os.Executable(); err == nil {
+			candidates = append(candidates, filepath.Join(filepath.Dir(executable), "..", "wakeword"))
+		}
+	}
+	for _, candidate := range candidates {
+		absolute, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		library := "libonnxruntime.so"
+		if runtime.GOOS == "darwin" {
+			library = "libonnxruntime.dylib"
+		} else if runtime.GOOS == "windows" {
+			library = "onnxruntime.dll"
+		}
+		if _, err := os.Stat(filepath.Join(absolute, "runtime", library)); err == nil {
+			return absolute, nil
+		}
+	}
+	return "", fmt.Errorf("wake word assets не найдены; выполни `make setup-wakeword` в каталоге проекта или передай -wake-assets /полный/путь/wakeword")
 }

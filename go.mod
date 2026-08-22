@@ -5,6 +5,8 @@ go 1.24
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/gen2brain/malgo v0.11.26
+	github.com/stanislaw-glogowski/openwakeword_go v0.1.1
+	github.com/yalue/onnxruntime_go v1.31.0
 	google.golang.org/genai v1.69.0
 )
 

@@ -3,3 +3,6 @@ node_modules/
 .DS_Store
 npm-debug.log*
 bin/
+.wakeword-job
+wakeword/models/
+wakeword/runtime/

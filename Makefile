@@ -1,4 +1,4 @@
-.PHONY: build test run voice text
+.PHONY: build test run wake voice text setup-wakeword
 
 build:
 	mkdir -p bin
@@ -12,8 +12,14 @@ test:
 run:
 	go run ./cmd/gateway
 
+wake:
+	go run ./cmd/satellite -mode wake
+
 voice:
 	go run ./cmd/satellite -mode voice
 
 text:
 	go run ./cmd/satellite -mode text
+
+setup-wakeword:
+	bash scripts/setup-wakeword.sh
