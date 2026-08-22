@@ -1,9 +1,10 @@
 import "dotenv/config";
-import crypto from "node:crypto";
+import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { GoogleGenAI, Modality } from "@google/genai";
 import express from "express";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { validateEntityAction } from "./lib/guard.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -13,23 +14,7 @@ const config = {
   host: process.env.HOST || "127.0.0.1",
   port: Number(process.env.PORT || 3000),
   haUrl: (process.env.HA_URL || "http://homeassistant.local").replace(/\/$/, ""),
-  model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2.1-mini",
-  voice: process.env.OPENAI_VOICE || "marin",
-};
-
-const realtimePricing = {
-  "gpt-realtime-2.1-mini": {
-    currency: "USD",
-    unit: "per_million_tokens",
-    rates: {
-      textInput: 0.6,
-      textCached: 0.06,
-      textOutput: 2.4,
-      audioInput: 10,
-      audioCached: 0.3,
-      audioOutput: 20,
-    },
-  },
+  model: process.env.GEMINI_LIVE_MODEL || "gemini-3.1-flash-live-preview",
 };
 
 app.disable("x-powered-by");
@@ -166,13 +151,64 @@ async function getControllableEntities() {
     }));
 }
 
+function buildInstructions(entities, responseMode) {
+  return [
+    "Ты голосовой ассистент умного дома.",
+    "Всегда отвечай по-русски, кратко и естественно.",
+    "Для управления домом используй только control_home_entity и get_home_state.",
+    "Не утверждай, что действие выполнено, пока функция не вернула успешный результат.",
+    "Не придумывай состояния устройств. Если команда неоднозначна, сначала уточни и жди ответа пользователя.",
+    "Для turn_on, turn_off и toggle сразу вызывай control_home_entity ровно один раз для выбранной сущности.",
+    "Не вызывай get_home_state до или после управления. При любом явном вопросе о текущем состоянии устройства обязан вызвать get_home_state и не имеешь права отвечать по памяти.",
+    "Не сообщай план перед вызовом функции.",
+    `После успешной команды ${responseMode === "text" ? "напиши" : "скажи"} итог максимум в пяти словах.`,
+    "Выбирай устройство по комнате Home Assistant. Кухня соответствует Kitchen, спальня — Bedroom, гостиная — Living Room.",
+    "Если пользователь просит свет в комнате, выбирай сущность light с этой комнатой.",
+    "Если подходящей сущности нет, сообщи об этом и не выполняй другое действие.",
+    `Доступные сущности: ${entities.map((entity) => `${entity.entity_id} (${entity.name}, комната: ${entity.area || "не назначена"})`).join("; ")}.`,
+  ].join(" ");
+}
+
+function buildTools(entities) {
+  return [{
+    functionDeclarations: [
+      {
+        name: "control_home_entity",
+        description: "Управляет одной разрешённой сущностью Home Assistant.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            entity_id: { type: "string", enum: entities.map((entity) => entity.entity_id) },
+            action: { type: "string", enum: ["turn_on", "turn_off", "toggle", "set_temperature"] },
+            temperature: { type: "number", minimum: 10, maximum: 30 },
+          },
+          required: ["entity_id", "action"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "get_home_state",
+        description: "Получает состояние сущности, когда пользователь явно спрашивает о нём.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            entity_id: { type: "string", enum: entities.map((entity) => entity.entity_id) },
+          },
+          required: ["entity_id"],
+          additionalProperties: false,
+        },
+      },
+    ],
+  }];
+}
+
 app.get("/api/health", async (_req, res) => {
   const result = {
     ok: true,
     homeAssistant: { url: config.haUrl, reachable: false, authenticated: false },
-    openAI: { configured: Boolean(process.env.OPENAI_API_KEY?.trim()) },
+    google: { configured: Boolean(process.env.GEMINI_API_KEY?.trim()) },
     model: config.model,
-    pricing: realtimePricing[config.model] || null,
+    pricing: null,
   };
 
   try {
@@ -183,7 +219,7 @@ app.get("/api/health", async (_req, res) => {
     const response = await fetchWithTimeout(`${config.haUrl}/api/`, { headers }, 5_000);
     result.homeAssistant.reachable = true;
     result.homeAssistant.authenticated = response.ok;
-    result.ok = response.ok && result.openAI.configured;
+    result.ok = response.ok && result.google.configured;
   } catch {
     result.ok = false;
   }
@@ -191,150 +227,34 @@ app.get("/api/health", async (_req, res) => {
   res.status(result.ok ? 200 : 503).json(result);
 });
 
-app.post(
-  "/session",
-  express.text({ type: ["application/sdp", "text/plain"], limit: "128kb" }),
-  async (req, res, next) => {
-    try {
-      const apiKey = requiredSecret("OPENAI_API_KEY");
-      const entities = await getControllableEntities();
-      const responseMode = req.query.response_mode === "text" ? "text" : "audio";
-      if (!req.body?.startsWith("v=")) {
-        return res.status(400).json({ error: "Ожидался WebRTC SDP offer." });
-      }
-
-      const session = {
-        type: "realtime",
-        model: config.model,
-        instructions: [
-          "Ты голосовой ассистент умного дома.",
-          "Всегда отвечай по-русски, кратко и естественно.",
-          "Для управления домом используй только control_home_entity и get_home_state.",
-          "Не утверждай, что действие выполнено, пока функция не вернула успешный результат.",
-          "Не придумывай состояния устройств. Если команда неоднозначна, сначала уточни.",
-          "Для turn_on, turn_off и toggle сразу вызывай control_home_entity ровно один раз для выбранной сущности.",
-          "Никогда не вызывай get_home_state до или после команды управления. get_home_state разрешён только когда пользователь явно спрашивает текущее состояние.",
-          "Не произноси и не пиши план перед вызовом функции. Сначала молча вызови функцию.",
-          `После успешной команды ${responseMode === "text" ? "напиши в чат" : "скажи"} одну фразу максимум из пяти слов, например: Свет на кухне включён.`,
-          "После итогового ответа не вызывай другие функции, пока пользователь не произнесёт новую команду.",
-          "Выбирай устройство по указанной комнате Home Assistant. Названия комнат могут быть на английском: кухня соответствует Kitchen, спальня — Bedroom, гостиная — Living Room.",
-          "Если пользователь просит включить свет в комнате, выбери сущность домена light, у которой явно указана эта комната.",
-          "Если подходящей сущности или разрешённого действия нет, сообщи об этом; не пытайся выполнить команду другим способом.",
-          "После результата функции кратко сообщи пользователю итог.",
-          `Доступные сущности: ${entities.map((entity) => `${entity.entity_id} (${entity.name}, комната: ${entity.area || "не назначена"})`).join("; ")}.`,
-        ].join(" "),
-        output_modalities: [responseMode],
-        ...(responseMode === "audio" ? { audio: { output: { voice: config.voice } } } : {}),
-        max_output_tokens: 180,
-        tools: [
-          {
-            type: "function",
-            name: "control_home_entity",
-            description:
-              "Сразу управляет конкретной разрешённой сущностью Home Assistant. Для turn_on, turn_off или toggle вызывай его без предварительного и последующего get_home_state.",
-            parameters: {
-              type: "object",
-              properties: {
-                entity_id: {
-                  type: "string",
-                  enum: entities.map((entity) => entity.entity_id),
-                  description: "Точный entity_id из списка доступных сущностей.",
-                },
-                action: {
-                  type: "string",
-                  enum: ["turn_on", "turn_off", "toggle", "set_temperature"],
-                },
-                temperature: {
-                  type: "number",
-                  description: "Температура 10–30 °C; только для set_temperature.",
-                },
-              },
-              required: ["entity_id", "action"],
-              additionalProperties: false,
-            },
-          },
-          {
-            type: "function",
-            name: "get_home_state",
-            description:
-              "Получает состояние только когда пользователь явно спрашивает, включено ли устройство или каково его состояние. Не используй перед или после управления.",
-            parameters: {
-              type: "object",
-              properties: {
-                entity_id: {
-                  type: "string",
-                  enum: entities.map((entity) => entity.entity_id),
-                },
-              },
-              required: ["entity_id"],
-              additionalProperties: false,
-            },
-          },
-        ],
-        tool_choice: "auto",
-      };
-
-      const form = new FormData();
-      form.set("sdp", req.body);
-      form.set("session", JSON.stringify(session));
-
-      const response = await fetchWithTimeout(
-        "https://api.openai.com/v1/realtime/calls",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "OpenAI-Safety-Identifier": crypto
-              .createHash("sha256")
-              .update("local-home-assistant-prototype")
-              .digest("hex"),
-          },
-          body: form,
-        },
-        30_000,
-      );
-
-      const body = await response.text();
-      if (!response.ok) {
-        console.error("OpenAI session error", response.status, body.slice(0, 500));
-        return res.status(response.status).json({
-          error: "OpenAI не создал Realtime-сессию.",
-          details: body.slice(0, 500),
-        });
-      }
-
-      res.type("application/sdp").send(body);
-    } catch (error) {
-      next(error);
-    }
-  },
-);
-
-app.post("/api/ha/entity", async (req, res, next) => {
-  try {
-    const requestedAction = req.body?.action || "get_state";
+async function performHomeAction(body = {}) {
+    const requestedAction = body.action || "get_state";
     const validation = validateEntityAction({
-      entityId: req.body?.entity_id,
+      entityId: body.entity_id,
       action: requestedAction,
-      temperature: req.body?.temperature,
+      temperature: body.temperature,
     });
     if (!validation.ok) {
-      return res.status(403).json({ ok: false, error: validation.reason });
+      const error = new Error(validation.reason);
+      error.statusCode = 403;
+      throw error;
     }
 
     if (validation.action === "get_state") {
       const response = await haRequest(`/api/states/${validation.entityId}`);
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        return res.status(response.status).json({ ok: false, error: `Home Assistant ответил ${response.status}.` });
+        const error = new Error(`Home Assistant ответил ${response.status}.`);
+        error.statusCode = response.status;
+        throw error;
       }
-      return res.json({
+      return {
         ok: true,
         entityId: validation.entityId,
         name: data.attributes?.friendly_name || validation.entityId,
         state: data.state,
         temperature: data.attributes?.current_temperature,
-      });
+      };
     }
 
     const serviceData = { entity_id: validation.entityId };
@@ -347,25 +267,187 @@ app.post("/api/ha/entity", async (req, res, next) => {
     );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return res.status(response.status).json({
-        ok: false,
-        error: `Home Assistant ответил ${response.status}.`,
-        details: data,
-      });
+      const error = new Error(`Home Assistant ответил ${response.status}.`);
+      error.statusCode = response.status;
+      error.details = data;
+      throw error;
     }
 
     const stateResponse = await haRequest(`/api/states/${validation.entityId}`);
     const state = await stateResponse.json().catch(() => ({}));
-    return res.json({
+    return {
       ok: true,
       entityId: validation.entityId,
       action: validation.action,
       state: state.state,
       name: state.attributes?.friendly_name || validation.entityId,
-    });
+    };
+}
+
+app.post("/api/ha/entity", async (req, res, next) => {
+  try {
+    res.json(await performHomeAction(req.body));
   } catch (error) {
     next(error);
   }
+});
+
+const server = createServer(app);
+const liveSockets = new WebSocketServer({ noServer: true });
+
+function sendJson(socket, payload) {
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+}
+
+function relayGeminiMessage(socket, message) {
+  const content = message.serverContent;
+  if (content?.inputTranscription?.text) {
+    sendJson(socket, { type: "input_transcript", text: content.inputTranscription.text });
+  }
+  if (content?.outputTranscription?.text) {
+    sendJson(socket, { type: "output_transcript", text: content.outputTranscription.text });
+  }
+  for (const part of content?.modelTurn?.parts || []) {
+    if (part.text) sendJson(socket, { type: "text_delta", text: part.text });
+    if (part.inlineData?.data) {
+      sendJson(socket, {
+        type: "audio_delta",
+        data: part.inlineData.data,
+        mimeType: part.inlineData.mimeType || "audio/pcm;rate=24000",
+      });
+    }
+  }
+  if (content?.interrupted) sendJson(socket, { type: "interrupted" });
+  if (content?.waitingForInput) sendJson(socket, { type: "waiting_for_input" });
+  if (content?.turnComplete) {
+    sendJson(socket, { type: "turn_complete", reason: content.turnCompleteReason || null });
+  }
+  if (message.usageMetadata) {
+    sendJson(socket, { type: "usage", usage: message.usageMetadata });
+  }
+}
+
+async function executeGeminiTools(session, socket, functionCalls = []) {
+  const functionResponses = [];
+  for (const call of functionCalls) {
+    if (!["control_home_entity", "get_home_state"].includes(call.name)) continue;
+    const args = call.args || {};
+    const requestBody = {
+      ...args,
+      action: call.name === "get_home_state" ? "get_state" : args.action,
+    };
+    sendJson(socket, {
+      type: "tool_call",
+      name: call.name,
+      args,
+    });
+
+    let result;
+    try {
+      result = await performHomeAction(requestBody);
+    } catch (error) {
+      result = { ok: false, error: error.message };
+    }
+    sendJson(socket, { type: "ha_result", result });
+    functionResponses.push({
+      id: call.id,
+      name: call.name,
+      response: result.ok ? { output: result } : { error: result.error },
+    });
+  }
+  if (functionResponses.length) session.sendToolResponse({ functionResponses });
+}
+
+liveSockets.on("connection", async (socket, request) => {
+  let session;
+  let closed = false;
+  socket.on("close", () => {
+    closed = true;
+    session?.close();
+  });
+  try {
+    const apiKey = requiredSecret("GEMINI_API_KEY");
+    const responseMode = "audio";
+    const entities = await getControllableEntities();
+    const ai = new GoogleGenAI({ apiKey });
+
+    session = await ai.live.connect({
+      model: config.model,
+      config: {
+        responseModalities: [Modality.AUDIO],
+        systemInstruction: buildInstructions(entities, responseMode),
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
+        maxOutputTokens: 180,
+        tools: buildTools(entities),
+      },
+      callbacks: {
+        onopen: () => {},
+        onmessage: (message) => {
+          relayGeminiMessage(socket, message);
+          if (message.toolCall?.functionCalls?.length) {
+            executeGeminiTools(session, socket, message.toolCall.functionCalls).catch((error) => {
+              sendJson(socket, { type: "error", message: error.message });
+            });
+          }
+        },
+        onerror: (event) => {
+          const message = event?.error?.message || event?.message || "Ошибка Gemini Live API";
+          console.error("Gemini Live error", message);
+          sendJson(socket, { type: "error", message });
+        },
+        onclose: (event) => {
+          const reason = event?.reason || "Gemini закрыл соединение";
+          if (event?.code && event.code !== 1000) {
+            console.warn("Gemini Live closed", event.code, reason);
+          }
+          sendJson(socket, { type: "closed", code: event?.code || null, reason });
+          if (socket.readyState === WebSocket.OPEN) socket.close();
+        },
+      },
+    });
+
+    if (closed) {
+      session.close();
+      return;
+    }
+    sendJson(socket, { type: "ready", model: config.model, responseMode });
+
+    socket.on("message", (raw) => {
+      try {
+        const event = JSON.parse(raw.toString());
+        if (event.type === "audio" && event.data) {
+          session.sendRealtimeInput({
+            audio: { data: event.data, mimeType: "audio/pcm;rate=16000" },
+          });
+        } else if (event.type === "audio_stream_end") {
+          session.sendRealtimeInput({ audioStreamEnd: true });
+        } else if (event.type === "text" && event.text) {
+          session.sendClientContent({
+            turns: [{ role: "user", parts: [{ text: event.text }] }],
+            turnComplete: true,
+          });
+        }
+      } catch (error) {
+        sendJson(socket, { type: "error", message: `Некорректное сообщение клиента: ${error.message}` });
+      }
+    });
+  } catch (error) {
+    sendJson(socket, { type: "error", message: error.message });
+    socket.close(1011, "Gemini session failed");
+  }
+
+});
+
+server.on("upgrade", (request, socket, head) => {
+  const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+  if (url.pathname !== "/gemini-live") {
+    socket.destroy();
+    return;
+  }
+  liveSockets.handleUpgrade(request, socket, head, (websocket) => {
+    liveSockets.emit("connection", websocket, request);
+  });
 });
 
 app.use((error, _req, res, _next) => {
@@ -374,8 +456,8 @@ app.use((error, _req, res, _next) => {
   res.status(status).json({ error: error.message || "Внутренняя ошибка." });
 });
 
-app.listen(config.port, config.host, () => {
+server.listen(config.port, config.host, () => {
   console.log(`Voice prototype: http://${config.host}:${config.port}`);
   console.log(`Home Assistant: ${config.haUrl}`);
-  console.log(`Realtime model: ${config.model}`);
+  console.log(`Gemini Live model: ${config.model}`);
 });

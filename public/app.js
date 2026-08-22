@@ -1,5 +1,3 @@
-import { addRealtimeUsage, calculateRealtimeCost, createUsage } from "./usage.js";
-
 const connectButton = document.querySelector("#connect");
 const buttonLabel = document.querySelector("#button-label");
 const muteButton = document.querySelector("#mute");
@@ -20,10 +18,14 @@ const totalCost = document.querySelector("#total-cost");
 const usageDetails = document.querySelector("#usage-details");
 const responseModeSelect = document.querySelector("#response-mode");
 
-let peerConnection;
-let dataChannel;
+let liveSocket;
 let microphoneStream;
-let remoteAudio;
+let captureContext;
+let captureSource;
+let captureProcessor;
+let captureSink;
+let playbackContext;
+let nextPlaybackTime = 0;
 let muted = false;
 let connecting = false;
 let baseWakeRecognizer;
@@ -35,12 +37,12 @@ let wakeSession = false;
 let wakeModelReady = false;
 let wakeRestartTimer;
 let wakeSessionTimer;
-let pricingRates;
-let requestUsage = createUsage();
-let requestUsageActive = false;
-let pageCost = 0;
 let sessionResponseMode = "text";
 let turnToolExecuted = false;
+let inputTranscript = "";
+let outputTranscript = "";
+let textResponse = "";
+let lastUsage;
 
 const WAKE_MODEL_NAME = "home-wake-sho-ty-golova-v1";
 const WAKE_LABEL = "sho-ty-golova";
@@ -62,67 +64,18 @@ function addMessage(title, text, kind = "") {
   messages.scrollTop = messages.scrollHeight;
 }
 
-function formatUsd(value) {
-  if (!Number.isFinite(value)) return "—";
-  return `$${value.toFixed(value < 0.01 ? 6 : 4)}`;
-}
-
 function formatTokens(value) {
   return new Intl.NumberFormat("ru-RU").format(value || 0);
 }
 
-function beginRequestUsage() {
-  if (requestUsageActive) return;
-  requestUsage = createUsage();
-  requestUsageActive = true;
-  turnToolExecuted = false;
-}
-
-function finishRequestUsage() {
-  if (!requestUsageActive) return;
-  const cost = calculateRealtimeCost(requestUsage, pricingRates);
-  if (cost) {
-    pageCost += cost.total;
-    lastCost.textContent = formatUsd(cost.total);
-    totalCost.textContent = formatUsd(pageCost);
-  } else {
-    lastCost.textContent = "тариф неизвестен";
-  }
-  const cacheRate = requestUsage.inputTokens > 0
-    ? Math.round((requestUsage.cachedTokens / requestUsage.inputTokens) * 100)
-    : 0;
-  usageDetails.textContent = [
-    `вход ${formatTokens(requestUsage.inputTokens)}`,
-    `кэш ${formatTokens(requestUsage.cachedTokens)} (${cacheRate}%)`,
-    `выход ${formatTokens(requestUsage.outputTokens)}`,
-    `аудио ${formatTokens(requestUsage.inputAudioTokens)} → ${formatTokens(requestUsage.outputAudioTokens)}`,
-  ].join(" · ");
-  console.info("OpenAI Realtime request usage", {
-    model: statusText.dataset.model,
-    usage: requestUsage,
-    cost,
-  });
-  requestUsageActive = false;
-}
-
-function recordResponseUsage(event) {
-  const response = event.response || {};
-  if (response.usage) {
-    beginRequestUsage();
-    requestUsage = addRealtimeUsage(requestUsage, response.usage);
-  }
-  const hasFunctionCall = response.output?.some((item) => item.type === "function_call");
-  if (!hasFunctionCall) finishRequestUsage();
-}
-
-function getResponseText(response) {
-  return (response?.output || [])
-    .filter((item) => item.type === "message")
-    .flatMap((item) => item.content || [])
-    .filter((part) => part.type === "output_text" && part.text)
-    .map((part) => part.text.trim())
-    .filter(Boolean)
-    .join(" ");
+function recordUsage(usage) {
+  lastUsage = usage;
+  const input = usage.promptTokenCount || 0;
+  const output = usage.responseTokenCount || 0;
+  lastCost.textContent = formatTokens(input + output);
+  totalCost.textContent = "см. Google Billing";
+  usageDetails.textContent = `вход ${formatTokens(input)} · выход ${formatTokens(output)} · всего ${formatTokens(usage.totalTokenCount)}`;
+  console.info("Gemini Live usage", usage);
 }
 
 function playWakeChime() {
@@ -146,9 +99,9 @@ function playWakeChime() {
 
 function scheduleWakeRestart(delay = 500) {
   clearTimeout(wakeRestartTimer);
-  if (!wakeEnabled || !wakeModelReady || peerConnection || connecting || wakeListening) return;
+  if (!wakeEnabled || !wakeModelReady || liveSocket || connecting || wakeListening) return;
   wakeRestartTimer = setTimeout(async () => {
-    if (!wakeEnabled || peerConnection || connecting || wakeListening) return;
+    if (!wakeEnabled || liveSocket || connecting || wakeListening) return;
     try {
       await startWakeListening();
     } catch (error) {
@@ -161,12 +114,12 @@ function scheduleWakeRestart(delay = 500) {
 function scheduleSessionTimeout(delay = 12_000) {
   clearTimeout(wakeSessionTimer);
   wakeSessionTimer = setTimeout(() => {
-    if (peerConnection) stopSession(true);
+    if (liveSocket) stopSession(true);
   }, delay);
 }
 
 async function triggerWakeWord() {
-  if (wakeTriggered || peerConnection || connecting) return;
+  if (wakeTriggered || liveSocket || connecting) return;
   wakeTriggered = true;
   wakeSession = true;
   await stopWakeListening();
@@ -175,7 +128,7 @@ async function triggerWakeWord() {
   playWakeChime();
   await startSession();
   wakeTriggered = false;
-  if (!peerConnection) {
+  if (!liveSocket) {
     wakeSession = false;
     scheduleWakeRestart(1_000);
   }
@@ -332,14 +285,13 @@ async function checkHealth() {
   try {
     const response = await fetch("/api/health");
     const health = await response.json();
-    pricingRates = health.pricing?.rates || null;
     statusText.dataset.model = health.model || "";
     if (health.ok) {
       setStatus(`Готов · ${health.model}`, "ok");
       return;
     }
     const missing = [];
-    if (!health.openAI?.configured) missing.push("OPENAI_API_KEY");
+    if (!health.google?.configured) missing.push("GEMINI_API_KEY");
     if (!health.homeAssistant?.authenticated) missing.push("HA_TOKEN");
     setStatus(`Нужна настройка: ${missing.join(", ") || "проверь Home Assistant"}`, "error");
   } catch {
@@ -347,109 +299,150 @@ async function checkHealth() {
   }
 }
 
-async function executeToolCall(event) {
-  turnToolExecuted = true;
-  let args;
-  try {
-    args = JSON.parse(event.arguments || "{}");
-  } catch {
-    args = {};
-  }
-
-  const command = `${args.action || "get_state"} → ${args.entity_id || "неизвестная сущность"}`;
-  addMessage("Дом", `Выполняю: ${command}`);
-  let output;
-  try {
-    const requestBody = { ...args, action: event.name === "get_home_state" ? "get_state" : args.action };
-    const response = await fetch("/api/ha/entity", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    });
-    output = await response.json();
-    if (!response.ok) throw new Error(output.error || "Команда отклонена");
-    const resultText = `${output.name || output.entityId}: ${output.state || "готово"}`;
-    addMessage("Home Assistant", resultText);
-  } catch (error) {
-    output = { ok: false, error: error.message };
-    addMessage("Ошибка", error.message, "error");
-  }
-
-  dataChannel.send(
-    JSON.stringify({
-      type: "conversation.item.create",
-      item: {
-        type: "function_call_output",
-        call_id: event.call_id,
-        output: JSON.stringify(output),
-      },
-    }),
-  );
-  dataChannel.send(JSON.stringify({ type: "response.create" }));
+function mergeTranscript(current, next) {
+  if (!next) return current;
+  if (!current || next.startsWith(current)) return next;
+  return `${current}${next}`;
 }
 
-function handleRealtimeEvent(event) {
-  if (
-    event.type === "response.function_call_arguments.done" &&
-    ["control_home_entity", "get_home_state"].includes(event.name)
-  ) {
-    executeToolCall(event);
+function floatToPcm16Base64(samples, sourceRate) {
+  const ratio = sourceRate / 16_000;
+  const length = Math.floor(samples.length / ratio);
+  const bytes = new Uint8Array(length * 2);
+  const view = new DataView(bytes.buffer);
+  for (let index = 0; index < length; index += 1) {
+    const start = Math.floor(index * ratio);
+    const end = Math.max(start + 1, Math.floor((index + 1) * ratio));
+    let sum = 0;
+    for (let sourceIndex = start; sourceIndex < end && sourceIndex < samples.length; sourceIndex += 1) {
+      sum += samples[sourceIndex];
+    }
+    const sample = Math.max(-1, Math.min(1, sum / (end - start)));
+    view.setInt16(index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
   }
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]);
+  return btoa(binary);
+}
 
-  if (event.type === "input_audio_buffer.speech_started") {
-    beginRequestUsage();
+async function startAudioCapture() {
+  const AudioContextApi = window.AudioContext || window.webkitAudioContext;
+  captureContext = new AudioContextApi();
+  await captureContext.resume();
+  captureSource = captureContext.createMediaStreamSource(microphoneStream);
+  captureProcessor = captureContext.createScriptProcessor(4096, 1, 1);
+  captureSink = captureContext.createGain();
+  captureSink.gain.value = 0;
+  captureProcessor.onaudioprocess = (event) => {
+    if (muted || liveSocket?.readyState !== WebSocket.OPEN) return;
+    const data = floatToPcm16Base64(event.inputBuffer.getChannelData(0), captureContext.sampleRate);
+    liveSocket.send(JSON.stringify({ type: "audio", data }));
+  };
+  captureSource.connect(captureProcessor);
+  captureProcessor.connect(captureSink);
+  captureSink.connect(captureContext.destination);
+}
+
+async function playPcmChunk(base64, mimeType) {
+  const AudioContextApi = window.AudioContext || window.webkitAudioContext;
+  playbackContext ||= new AudioContextApi();
+  await playbackContext.resume();
+  const rate = Number(/rate=(\d+)/.exec(mimeType || "")?.[1] || 24_000);
+  const binary = atob(base64);
+  const sampleCount = Math.floor(binary.length / 2);
+  const buffer = playbackContext.createBuffer(1, sampleCount, rate);
+  const channel = buffer.getChannelData(0);
+  for (let index = 0; index < sampleCount; index += 1) {
+    const low = binary.charCodeAt(index * 2);
+    const high = binary.charCodeAt(index * 2 + 1);
+    const value = (high << 8) | low;
+    channel[index] = (value & 0x8000 ? value - 0x10000 : value) / 0x8000;
+  }
+  const source = playbackContext.createBufferSource();
+  source.buffer = buffer;
+  source.connect(playbackContext.destination);
+  const startAt = Math.max(playbackContext.currentTime + 0.02, nextPlaybackTime);
+  source.start(startAt);
+  nextPlaybackTime = startAt + buffer.duration;
+}
+
+function flushTurnMessages() {
+  if (inputTranscript.trim()) addMessage("Вы", inputTranscript.trim());
+  const assistantText = (outputTranscript || textResponse).trim();
+  if (assistantText) addMessage("Ассистент", assistantText);
+  inputTranscript = "";
+  outputTranscript = "";
+  textResponse = "";
+}
+
+function handleGeminiEvent(event) {
+  if (event.type === "ready") {
+    statusText.dataset.model = event.model;
     setStatus("Слушаю…", "ok");
+    connectButton.classList.add("connected");
+    buttonLabel.textContent = "Завершить";
+    muteButton.disabled = false;
+    addMessage("Система", "Gemini Live-сессия запущена.");
+    startAudioCapture().catch((error) => {
+      addMessage("Ошибка", error.message, "error");
+      stopSession(false);
+    });
+    scheduleSessionTimeout(15_000);
+  } else if (event.type === "input_transcript") {
+    inputTranscript = mergeTranscript(inputTranscript, event.text);
+    setStatus("Думаю…", "ok");
     connectButton.classList.add("speaking");
     scheduleSessionTimeout(15_000);
-  }
-  if (event.type === "input_audio_buffer.speech_stopped") {
-    setStatus("Думаю…", "ok");
-    connectButton.classList.remove("speaking");
-  }
-  if (event.type === "output_audio_buffer.started" || event.type === "response.output_audio.delta") {
+  } else if (event.type === "output_transcript") {
+    outputTranscript = mergeTranscript(outputTranscript, event.text);
     setStatus("Отвечаю…", "ok");
-  }
-  if (event.type === "response.output_text.delta") {
+    connectButton.classList.remove("speaking");
+  } else if (event.type === "text_delta") {
+    textResponse += event.text || "";
     setStatus("Пишу…", "ok");
-  }
-  if (event.type === "output_audio_buffer.stopped") {
-    setStatus(turnToolExecuted ? "Готово" : "Жду уточнение…", "ok");
-    scheduleSessionTimeout(turnToolExecuted ? 900 : 15_000);
-  }
-  if (event.type === "response.output_audio.done") {
-    scheduleSessionTimeout(turnToolExecuted ? 2_500 : 15_000);
-  }
-  if (event.type === "response.done") {
-    const hasFunctionCall = event.response?.output?.some((item) => item.type === "function_call");
-    const responseText = getResponseText(event.response);
-    if (responseText && !hasFunctionCall) addMessage("Ассистент", responseText);
-    recordResponseUsage(event);
-    if (hasFunctionCall) {
-      clearTimeout(wakeSessionTimer);
-    } else if (turnToolExecuted) {
-      scheduleSessionTimeout(sessionResponseMode === "text" ? 500 : 5_000);
+  } else if (event.type === "audio_delta") {
+    setStatus("Отвечаю…", "ok");
+    playPcmChunk(event.data, event.mimeType).catch(console.error);
+  } else if (event.type === "tool_call") {
+    turnToolExecuted = true;
+    clearTimeout(wakeSessionTimer);
+    const args = event.args || {};
+    addMessage("Дом", `Выполняю: ${args.action || "get_state"} → ${args.entity_id || "неизвестная сущность"}`);
+  } else if (event.type === "ha_result") {
+    const result = event.result || {};
+    if (result.ok) addMessage("Home Assistant", `${result.name || result.entityId}: ${result.state || "готово"}`);
+    else addMessage("Ошибка", result.error || "Команда отклонена", "error");
+  } else if (event.type === "usage") {
+    recordUsage(event.usage || {});
+  } else if (event.type === "interrupted") {
+    nextPlaybackTime = playbackContext?.currentTime || 0;
+    setStatus("Слушаю…", "ok");
+  } else if (event.type === "turn_complete") {
+    setTimeout(flushTurnMessages, 250);
+    if (turnToolExecuted) {
+      const playbackDelay = playbackContext
+        ? Math.max(0, (nextPlaybackTime - playbackContext.currentTime) * 1000)
+        : 0;
+      setStatus("Готово", "ok");
+      scheduleSessionTimeout(playbackDelay + 500);
     } else {
       setStatus("Жду уточнение…", "ok");
       scheduleSessionTimeout(15_000);
     }
-  }
-  if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
-    addMessage("Вы", event.transcript);
-  }
-  if (event.type === "response.output_audio_transcript.done" && event.transcript) {
-    addMessage("Ассистент", event.transcript);
-  }
-  if (event.type === "error") {
-    const message = event.error?.message || "Ошибка Realtime API";
-    addMessage("OpenAI", message, "error");
-    setStatus(message, "error");
+  } else if (event.type === "error") {
+    addMessage("Gemini", event.message || "Ошибка Gemini Live API", "error");
+    setStatus(event.message || "Ошибка Gemini Live API", "error");
   }
 }
 
 async function startSession() {
-  if (connecting || peerConnection) return;
+  if (connecting || liveSocket) return;
   connecting = true;
   sessionResponseMode = responseModeSelect.value;
+  turnToolExecuted = false;
+  inputTranscript = "";
+  outputTranscript = "";
+  textResponse = "";
   connectButton.disabled = true;
   responseModeSelect.disabled = true;
   buttonLabel.textContent = "Подключаю…";
@@ -457,55 +450,26 @@ async function startSession() {
   if (wakeListening) await stopWakeListening();
 
   try {
-    const pc = new RTCPeerConnection();
-    peerConnection = pc;
-    remoteAudio = new Audio();
-    remoteAudio.autoplay = true;
-    pc.ontrack = (event) => {
-      remoteAudio.srcObject = event.streams[0];
-    };
-
     microphoneStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
-    pc.addTrack(microphoneStream.getAudioTracks()[0], microphoneStream);
-
-    dataChannel = pc.createDataChannel("oai-events");
-    dataChannel.addEventListener("message", (message) => {
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${location.host}/gemini-live?response_mode=${encodeURIComponent(sessionResponseMode)}`);
+    liveSocket = socket;
+    socket.addEventListener("message", (message) => {
+      if (liveSocket !== socket) return;
       try {
-        handleRealtimeEvent(JSON.parse(message.data));
+        handleGeminiEvent(JSON.parse(message.data));
       } catch (error) {
-        console.error("Invalid Realtime event", error);
+        console.error("Invalid Gemini event", error);
       }
     });
-    dataChannel.addEventListener("open", () => {
-      setStatus("Слушаю…", "ok");
-      connectButton.classList.add("connected");
-      buttonLabel.textContent = "Завершить";
-      muteButton.disabled = false;
-      addMessage("Система", "Голосовая сессия запущена.");
-      scheduleSessionTimeout(15_000);
+    socket.addEventListener("error", () => {
+      setStatus("Ошибка WebSocket Gemini", "error");
     });
-
-    pc.addEventListener("connectionstatechange", () => {
-      if (["failed", "disconnected", "closed"].includes(pc.connectionState) && peerConnection) {
-        setStatus(`Соединение: ${pc.connectionState}`, pc.connectionState === "failed" ? "error" : "");
-      }
+    socket.addEventListener("close", () => {
+      if (liveSocket === socket) stopSession(false);
     });
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    const response = await fetch(`/session?response_mode=${encodeURIComponent(sessionResponseMode)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/sdp" },
-      body: offer.sdp,
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(error.details || error.error || `Session error ${response.status}`);
-    }
-
-    await pc.setRemoteDescription({ type: "answer", sdp: await response.text() });
   } catch (error) {
     addMessage("Ошибка", error.message, "error");
     setStatus(error.message, "error");
@@ -518,14 +482,25 @@ async function startSession() {
 
 function stopSession(showMessage = true) {
   clearTimeout(wakeSessionTimer);
+  if (liveSocket?.readyState === WebSocket.OPEN) {
+    liveSocket.send(JSON.stringify({ type: "audio_stream_end" }));
+  }
   microphoneStream?.getTracks().forEach((track) => track.stop());
-  dataChannel?.close();
-  peerConnection?.close();
-  if (remoteAudio) remoteAudio.srcObject = null;
+  captureProcessor?.disconnect();
+  captureSource?.disconnect();
+  captureSink?.disconnect();
+  captureContext?.close();
+  playbackContext?.close();
+  const socket = liveSocket;
+  liveSocket = undefined;
+  socket?.close();
   microphoneStream = undefined;
-  dataChannel = undefined;
-  peerConnection = undefined;
-  remoteAudio = undefined;
+  captureContext = undefined;
+  captureSource = undefined;
+  captureProcessor = undefined;
+  captureSink = undefined;
+  playbackContext = undefined;
+  nextPlaybackTime = 0;
   muted = false;
   muteButton.disabled = true;
   responseModeSelect.disabled = false;
@@ -539,7 +514,7 @@ function stopSession(showMessage = true) {
 }
 
 connectButton.addEventListener("click", () => {
-  if (peerConnection) stopSession();
+  if (liveSocket) stopSession();
   else {
     wakeSession = false;
     startSession();

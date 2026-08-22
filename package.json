@@ -1,9 +1,9 @@
 {
-  "name": "home-assistant-openai-voice",
+  "name": "home-assistant-gemini-live",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local OpenAI Realtime voice prototype for Home Assistant",
+  "description": "Local Gemini Live voice prototype for Home Assistant",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
@@ -13,6 +13,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@google/genai": "^2.18.0",
     "@tensorflow-models/speech-commands": "^0.5.4",
     "@tensorflow/tfjs": "^4.22.0",
     "dotenv": "^17.2.2",
