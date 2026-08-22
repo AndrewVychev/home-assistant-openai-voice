@@ -2,7 +2,6 @@ package live
 
 import (
 	"encoding/binary"
-	"strings"
 	"testing"
 )
 
@@ -43,12 +42,31 @@ func TestOpenAISessionUpdateUsesRealtimeAudioAndRussianTranscription(t *testing.
 		t.Fatalf("input rate = %#v", format["rate"])
 	}
 	transcription := input["transcription"].(map[string]any)
-	if transcription["language"] != "ru" || !strings.Contains(transcription["prompt"].(string), "выключи") {
+	if transcription["language"] != "ru" {
 		t.Fatalf("transcription = %#v", transcription)
+	}
+	if _, exists := transcription["prompt"]; exists {
+		t.Fatalf("device vocabulary must not be sent as transcription prompt: %#v", transcription)
+	}
+	if input["noise_reduction"].(map[string]any)["type"] != "far_field" {
+		t.Fatalf("noise reduction = %#v", input["noise_reduction"])
+	}
+	if session["max_output_tokens"] != 256 {
+		t.Fatalf("max output tokens = %#v", session["max_output_tokens"])
 	}
 	output := audio["output"].(map[string]any)
 	if output["format"].(map[string]any)["rate"] != 24000 || output["voice"] != "marin" {
 		t.Fatalf("output audio = %#v", output)
+	}
+}
+
+func TestOpenAIRejectsTranscriptionPromptEcho(t *testing.T) {
+	echo := "включи, выключи, отключи, свет, лампа, кондиционер, кухня, Kitchen Main"
+	if !looksLikeTranscriptionPromptEcho(echo) {
+		t.Fatal("expected vocabulary echo to be rejected")
+	}
+	if looksLikeTranscriptionPromptEcho("включи свет в кухне") {
+		t.Fatal("normal command must not be rejected")
 	}
 }
 

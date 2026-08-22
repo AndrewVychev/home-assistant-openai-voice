@@ -380,6 +380,14 @@ function flushTurnMessages() {
   textResponse = "";
 }
 
+function requestsClarification(text) {
+  const normalized = (text || "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes("?")) return true;
+  return ["уточни", "какой ", "какая ", "какое ", "какие ", "в какой ", "что именно"]
+    .some((marker) => normalized.includes(marker));
+}
+
 function handleLiveEvent(event) {
   if (event.type === "ready") {
     statusText.dataset.model = event.model;
@@ -425,6 +433,7 @@ function handleLiveEvent(event) {
     nextPlaybackTime = playbackContext?.currentTime || 0;
     setStatus("Слушаю…", "ok");
   } else if (event.type === "turn_complete") {
+    const assistantText = (outputTranscript || textResponse).trim();
     setTimeout(flushTurnMessages, 250);
     if (turnToolExecuted) {
       const playbackDelay = playbackContext
@@ -432,9 +441,12 @@ function handleLiveEvent(event) {
         : 0;
       setStatus("Готово", "ok");
       scheduleSessionTimeout(playbackDelay + 500);
-    } else {
+    } else if (requestsClarification(assistantText)) {
       setStatus("Жду уточнение…", "ok");
       scheduleSessionTimeout(15_000);
+    } else {
+      setStatus("Готово", "ok");
+      scheduleSessionTimeout(500);
     }
   } else if (event.type === "error") {
     addMessage(sessionProvider, event.message || "Ошибка Live API", "error");

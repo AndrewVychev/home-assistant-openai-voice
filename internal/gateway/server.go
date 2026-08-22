@@ -40,11 +40,11 @@ type socketWriter struct {
 }
 
 type liveSession struct {
-	session             liveapi.Session
-	sendMu              sync.Mutex
-	transcriptMu        sync.Mutex
-	closeOnce           sync.Once
-	lastInputTranscript string
+	session          liveapi.Session
+	sendMu           sync.Mutex
+	transcriptMu     sync.Mutex
+	closeOnce        sync.Once
+	inputTranscripts []string
 }
 
 func New(cfg config.Config, logger *log.Logger) *Server {
@@ -227,7 +227,7 @@ func (server *Server) readBrowser(ctx context.Context, connection *websocket.Con
 			}
 		case "text":
 			if strings.TrimSpace(event.Text) != "" {
-				conversation.setInputTranscript(event.Text)
+				conversation.appendInputTranscript(event.Text)
 				if err := conversation.sendText(event.Text); err != nil {
 					return err
 				}
@@ -239,7 +239,7 @@ func (server *Server) readBrowser(ctx context.Context, connection *websocket.Con
 func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, conversation *liveSession, event liveapi.Event, responseMode string) {
 	switch event.Kind {
 	case liveapi.EventInputTranscript:
-		conversation.setInputTranscript(event.Text)
+		conversation.appendInputTranscript(event.Text)
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "text": event.Text})
 	case liveapi.EventOutputTranscript, liveapi.EventTextDelta:
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "text": event.Text})
@@ -256,7 +256,6 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, co
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "usage": event.Usage})
 	case liveapi.EventTurnComplete:
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "reason": event.Reason})
-		conversation.setInputTranscript("")
 	case liveapi.EventInterrupted, liveapi.EventWaitingForInput:
 		writer.send(ctx, map[string]any{"type": string(event.Kind)})
 	case liveapi.EventError:
@@ -265,6 +264,7 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, co
 }
 
 func (server *Server) executeTools(ctx context.Context, writer *socketWriter, conversation *liveSession, calls []liveapi.ToolCall) {
+	defer conversation.clearInputTranscript()
 	responses := make([]liveapi.ToolResult, 0, len(calls))
 	for _, call := range calls {
 		if call.Name != "control_home_entity" && call.Name != "get_home_state" {
@@ -437,16 +437,25 @@ func (conversation *liveSession) sendToolResults(results []liveapi.ToolResult) e
 	return conversation.session.SendToolResults(results)
 }
 
-func (conversation *liveSession) setInputTranscript(value string) {
+func (conversation *liveSession) appendInputTranscript(value string) {
 	conversation.transcriptMu.Lock()
 	defer conversation.transcriptMu.Unlock()
-	conversation.lastInputTranscript = strings.TrimSpace(value)
+	value = strings.TrimSpace(value)
+	if value != "" {
+		conversation.inputTranscripts = append(conversation.inputTranscripts, value)
+	}
 }
 
 func (conversation *liveSession) inputTranscript() string {
 	conversation.transcriptMu.Lock()
 	defer conversation.transcriptMu.Unlock()
-	return conversation.lastInputTranscript
+	return strings.Join(conversation.inputTranscripts, "\n")
+}
+
+func (conversation *liveSession) clearInputTranscript() {
+	conversation.transcriptMu.Lock()
+	defer conversation.transcriptMu.Unlock()
+	conversation.inputTranscripts = conversation.inputTranscripts[:0]
 }
 
 func (conversation *liveSession) close() {

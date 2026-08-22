@@ -96,14 +96,14 @@ func openAISessionUpdate(model, voice string, config SessionConfig) map[string]a
 		mode = "text"
 	}
 	input := map[string]any{
-		"format": map[string]any{"type": "audio/pcm", "rate": 24000},
+		"format":          map[string]any{"type": "audio/pcm", "rate": 24000},
+		"noise_reduction": map[string]any{"type": "far_field"},
 		"turn_detection": map[string]any{
 			"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300,
 			"silence_duration_ms": 500, "create_response": true, "interrupt_response": true,
 		},
 		"transcription": map[string]any{
 			"model": "gpt-4o-mini-transcribe", "language": "ru",
-			"prompt": strings.Join(config.Vocabulary, ", "),
 		},
 	}
 	audio := map[string]any{"input": input}
@@ -125,7 +125,7 @@ func openAISessionUpdate(model, voice string, config SessionConfig) map[string]a
 		"session": map[string]any{
 			"type": "realtime", "model": model, "instructions": config.Instructions,
 			"output_modalities": []string{mode}, "audio": audio,
-			"max_output_tokens": 64, "tools": tools, "tool_choice": "auto",
+			"max_output_tokens": 256, "tools": tools, "tool_choice": "auto",
 		},
 	}
 }
@@ -196,6 +196,10 @@ func (session *openAISession) Receive() (Event, error) {
 		}
 		switch raw.Type {
 		case "conversation.item.input_audio_transcription.completed":
+			if looksLikeTranscriptionPromptEcho(raw.Transcript) {
+				log.Printf("OpenAI transcription discarded probable prompt echo")
+				continue
+			}
 			return Event{Kind: EventInputTranscript, Text: raw.Transcript}, nil
 		case "response.output_audio_transcript.done":
 			return Event{Kind: EventOutputTranscript, Text: raw.Transcript}, nil
@@ -245,6 +249,20 @@ func (session *openAISession) Receive() (Event, error) {
 			return Event{Kind: EventError, Text: raw.asError().Error()}, nil
 		}
 	}
+}
+
+func looksLikeTranscriptionPromptEcho(transcript string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(transcript))
+	if strings.Count(normalized, ",") < 5 {
+		return false
+	}
+	hits := 0
+	for _, phrase := range []string{"включи", "выключи", "отключи", "свет", "лампа", "кондиционер"} {
+		if strings.Contains(normalized, phrase) {
+			hits++
+		}
+	}
+	return hits >= 5
 }
 
 func (session *openAISession) toolCallEvent(callID, name, arguments string) (Event, bool, error) {

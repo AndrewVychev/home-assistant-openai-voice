@@ -157,7 +157,7 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 	detections := 0
 	for {
 		if err := client.waitForWake(ctx, detector, config.Debug); err != nil {
-			if errors.Is(err, context.Canceled) {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return err
@@ -177,6 +177,9 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 		}
 		err := client.RunVoice(sessionCtx)
 		cancel()
+		if ctx.Err() != nil {
+			return nil
+		}
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			fprintf(client.Output, "Голосовая сессия: %v\n", err)
 		}
@@ -254,6 +257,7 @@ func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn
 	toolExecuted := false
 	mutedForReply := false
 	var textResponse strings.Builder
+	var assistantResponse strings.Builder
 	for {
 		message, err := receive(ctx, connection)
 		if err != nil {
@@ -271,7 +275,9 @@ func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn
 				mutedForReply = true
 			}
 			fprintf(client.Output, "Ассистент: %s\n", strings.TrimSpace(message.Text))
+			assistantResponse.WriteString(message.Text)
 		case "text_delta":
+			assistantResponse.WriteString(message.Text)
 			if audio == nil {
 				textResponse.WriteString(message.Text)
 			}
@@ -308,14 +314,31 @@ func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn
 			if audio != nil {
 				audio.WaitPlayback(6 * time.Second)
 			}
-			if toolExecuted || audio == nil {
+			if toolExecuted || audio == nil || !requestsClarification(assistantResponse.String()) {
 				return nil
 			}
+			assistantResponse.Reset()
 			mutedForReply = false
 			audio.Listen(true)
 			fprintf(client.Output, "Слушаю уточнение…\n")
 		}
 	}
+}
+
+func requestsClarification(response string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(response))
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, "?") {
+		return true
+	}
+	for _, marker := range []string{"уточни", "какой ", "какая ", "какое ", "какие ", "в какой ", "что именно"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (client Client) connect(ctx context.Context, responseMode string) (*websocket.Conn, error) {
