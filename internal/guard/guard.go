@@ -13,6 +13,7 @@ var safeActions = map[string]map[string]bool{
 	"light":   {"get_state": true, "turn_on": true, "turn_off": true, "toggle": true},
 	"switch":  {"get_state": true, "turn_on": true, "turn_off": true, "toggle": true},
 	"climate": {"get_state": true, "turn_on": true, "turn_off": true, "set_temperature": true},
+	"weather": {"get_state": true},
 }
 
 type Action struct {

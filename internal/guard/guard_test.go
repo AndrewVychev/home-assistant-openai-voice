@@ -14,6 +14,15 @@ func TestValidateRejectsLock(t *testing.T) {
 	}
 }
 
+func TestValidateWeatherIsReadOnly(t *testing.T) {
+	if _, err := Validate("weather.forecast_home", "get_state", 0); err != nil {
+		t.Fatalf("expected weather state read to pass: %v", err)
+	}
+	if _, err := Validate("weather.forecast_home", "turn_on", 0); err == nil {
+		t.Fatal("expected weather control to be rejected")
+	}
+}
+
 func TestValidateTemperature(t *testing.T) {
 	if _, err := Validate("climate.living_room", "set_temperature", 31); err == nil {
 		t.Fatal("expected unsafe temperature to be rejected")

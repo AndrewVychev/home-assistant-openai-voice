@@ -37,6 +37,11 @@ type Result struct {
 	Action              string  `json:"action,omitempty"`
 	State               string  `json:"state"`
 	Temperature         float64 `json:"temperature,omitempty"`
+	TemperatureUnit     string  `json:"temperatureUnit,omitempty"`
+	Humidity            float64 `json:"humidity,omitempty"`
+	CloudCoverage       float64 `json:"cloudCoverage,omitempty"`
+	WindSpeed           float64 `json:"windSpeed,omitempty"`
+	WindSpeedUnit       string  `json:"windSpeedUnit,omitempty"`
 	Confirmed           bool    `json:"confirmed,omitempty"`
 	RecoveredFromStatus int     `json:"recoveredFromStatus,omitempty"`
 }
@@ -100,7 +105,7 @@ func (client *Client) ControllableEntities(ctx context.Context) ([]Entity, error
 	entities := make([]Entity, 0, len(states))
 	for _, item := range states {
 		domain, _, _ := strings.Cut(item.EntityID, ".")
-		if domain != "light" && domain != "switch" && domain != "climate" {
+		if domain != "light" && domain != "switch" && domain != "climate" && domain != "weather" {
 			continue
 		}
 		if strings.HasPrefix(item.EntityID, "switch.shelly") {
@@ -323,16 +328,30 @@ func resultFromState(value state, action string, confirmed bool, recovered int) 
 	if name == "" {
 		name = value.EntityID
 	}
+	temperature := number(value.Attributes["current_temperature"])
+	if _, exists := value.Attributes["current_temperature"]; !exists {
+		temperature = number(value.Attributes["temperature"])
+	}
 	return Result{
 		OK:                  true,
 		EntityID:            value.EntityID,
 		Name:                name,
 		Action:              action,
 		State:               value.State,
-		Temperature:         number(value.Attributes["current_temperature"]),
+		Temperature:         temperature,
+		TemperatureUnit:     stringValue(value.Attributes["temperature_unit"]),
+		Humidity:            number(value.Attributes["humidity"]),
+		CloudCoverage:       number(value.Attributes["cloud_coverage"]),
+		WindSpeed:           number(value.Attributes["wind_speed"]),
+		WindSpeedUnit:       stringValue(value.Attributes["wind_speed_unit"]),
 		Confirmed:           confirmed,
 		RecoveredFromStatus: recovered,
 	}
+}
+
+func stringValue(value any) string {
+	result, _ := value.(string)
+	return result
 }
 
 func guardState(value state) guard.State {

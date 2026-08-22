@@ -39,3 +39,22 @@ func TestPerformRecoversWhenServiceReturns500ButStateChanged(t *testing.T) {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 }
+
+func TestWeatherResultIncludesCurrentConditions(t *testing.T) {
+	result := resultFromState(state{
+		EntityID: "weather.forecast_home",
+		State:    "clear-night",
+		Attributes: map[string]any{
+			"friendly_name":    "Forecast Home",
+			"temperature":      14.4,
+			"temperature_unit": "°C",
+			"humidity":         87.0,
+			"cloud_coverage":   3.1,
+			"wind_speed":       15.8,
+			"wind_speed_unit":  "km/h",
+		},
+	}, "get_state", false, 0)
+	if result.Temperature != 14.4 || result.TemperatureUnit != "°C" || result.Humidity != 87 || result.WindSpeed != 15.8 {
+		t.Fatalf("unexpected weather result: %#v", result)
+	}
+}

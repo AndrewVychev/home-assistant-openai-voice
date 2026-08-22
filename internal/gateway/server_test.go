@@ -22,7 +22,7 @@ func TestTranscriptionVocabularyContainsRussianCommandsAndEntities(t *testing.T)
 
 func TestInstructionsRejectUncertainForeignTranscript(t *testing.T) {
 	instructions := buildInstructions(nil, "audio")
-	for _, phrase := range []string{"только как русскую речь", "нерусскую или сомнительную", "turn_on", "turn_off", "ровно значение confirmation", "Обычные вопросы"} {
+	for _, phrase := range []string{"только как русскую речь", "нерусскую или сомнительную", "turn_on", "turn_off", "ровно значение confirmation", "После get_home_state", "Обычные вопросы"} {
 		if !strings.Contains(instructions, phrase) {
 			t.Fatalf("instructions do not contain %q", phrase)
 		}
@@ -59,5 +59,23 @@ func TestToolResultForModelReturnsExplicitError(t *testing.T) {
 	result := toolResultForModel(liveapi.ToolCall{}, nil, errors.New("boom"))
 	if result["ok"] != false || result["error"] != "boom" {
 		t.Fatalf("unexpected error result: %#v", result)
+	}
+}
+
+func TestBuildToolsMakesWeatherReadOnly(t *testing.T) {
+	entities := []homeassistant.Entity{
+		{EntityID: "light.kitchen"},
+		{EntityID: "weather.forecast_home"},
+	}
+	tools := buildTools(entities)
+	controlProperties := tools[0].Parameters["properties"].(map[string]any)
+	controlIDs := controlProperties["entity_id"].(map[string]any)["enum"].([]string)
+	if slices.Contains(controlIDs, "weather.forecast_home") {
+		t.Fatalf("weather leaked into control tool: %#v", controlIDs)
+	}
+	stateProperties := tools[1].Parameters["properties"].(map[string]any)
+	stateIDs := stateProperties["entity_id"].(map[string]any)["enum"].([]string)
+	if !slices.Contains(stateIDs, "weather.forecast_home") {
+		t.Fatalf("weather missing from state tool: %#v", stateIDs)
 	}
 }

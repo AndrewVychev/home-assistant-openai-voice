@@ -295,7 +295,10 @@ func toolResultForModel(call liveapi.ToolCall, payload map[string]any, err error
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	result := map[string]any{"ok": true}
-	for _, key := range []string{"entityId", "name", "state", "temperature", "confirmed"} {
+	for _, key := range []string{
+		"entityId", "name", "state", "temperature", "temperatureUnit", "humidity",
+		"cloudCoverage", "windSpeed", "windSpeedUnit", "confirmed",
+	} {
 		if value, exists := payload[key]; exists {
 			result[key] = value
 		}
@@ -379,8 +382,10 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 		"Никаких приветствий, объяснений, планов, советов и лишних вопросов.",
 		"Никогда не сообщай о намерении перед вызовом функции: сразу вызывай функцию без текста.",
 		"После результата функции с ok=true и полем confirmation " + verb + " ровно значение confirmation без изменений и ничего больше.",
+		"После get_home_state с ok=true обязательно " + verb + " пользователю краткий ответ по полученным данным.",
 		"Обычные вопросы, не относящиеся к управлению домом, не являются ошибкой: ответь на них напрямую без вызова функций.",
 		"Если для ответа нужны актуальные внешние данные, которых у тебя нет, кратко и честно скажи об этом; не проси повторять уже понятный вопрос.",
+		"На вопрос о текущей погоде обязательно вызови get_home_state для weather-сущности; если weather-сущность одна, используй её и для вопроса с названием города.",
 		"Если команда неоднозначна, задай ровно один короткий вопрос с вариантами и жди ответа.",
 		"Для управления используй только control_home_entity и get_home_state.",
 		"Не утверждай, что действие выполнено, пока функция не вернула ok=true.",
@@ -395,11 +400,17 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 }
 
 func buildTools(entities []homeassistant.Entity) []liveapi.Tool {
-	entityIDs := make([]string, 0, len(entities))
+	controllableIDs := make([]string, 0, len(entities))
+	readableIDs := make([]string, 0, len(entities))
 	for _, entity := range entities {
-		entityIDs = append(entityIDs, entity.EntityID)
+		readableIDs = append(readableIDs, entity.EntityID)
+		domain, _, _ := strings.Cut(entity.EntityID, ".")
+		if domain == "light" || domain == "switch" || domain == "climate" {
+			controllableIDs = append(controllableIDs, entity.EntityID)
+		}
 	}
-	entitySchema := map[string]any{"type": "string", "enum": entityIDs}
+	controllableSchema := map[string]any{"type": "string", "enum": controllableIDs}
+	readableSchema := map[string]any{"type": "string", "enum": readableIDs}
 	return []liveapi.Tool{
 		{
 			Name:        "control_home_entity",
@@ -407,7 +418,7 @@ func buildTools(entities []homeassistant.Entity) []liveapi.Tool {
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"entity_id":   entitySchema,
+					"entity_id":   controllableSchema,
 					"action":      map[string]any{"type": "string", "enum": []string{"turn_on", "turn_off", "toggle", "set_temperature"}},
 					"temperature": map[string]any{"type": "number", "minimum": 10, "maximum": 30},
 				},
@@ -420,7 +431,7 @@ func buildTools(entities []homeassistant.Entity) []liveapi.Tool {
 			Description: "Получает состояние сущности по явному вопросу пользователя.",
 			Parameters: map[string]any{
 				"type":                 "object",
-				"properties":           map[string]any{"entity_id": entitySchema},
+				"properties":           map[string]any{"entity_id": readableSchema},
 				"required":             []string{"entity_id"},
 				"additionalProperties": false,
 			},
