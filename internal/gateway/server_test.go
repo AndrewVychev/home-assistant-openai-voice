@@ -22,7 +22,7 @@ func TestTranscriptionVocabularyContainsRussianCommandsAndEntities(t *testing.T)
 
 func TestInstructionsRejectUncertainForeignTranscript(t *testing.T) {
 	instructions := buildInstructions(nil, "audio")
-	for _, phrase := range []string{"только как русскую речь", "нерусскую или сомнительную", "turn_on", "turn_off", "ровно значение confirmation", "После get_home_state", "Обычные вопросы"} {
+	for _, phrase := range []string{"только как русскую речь", "нерусскую или сомнительную", "turn_on", "turn_off", "ровно значение confirmation", "Обычные вопросы"} {
 		if !strings.Contains(instructions, phrase) {
 			t.Fatalf("instructions do not contain %q", phrase)
 		}
@@ -77,5 +77,20 @@ func TestBuildToolsMakesWeatherReadOnly(t *testing.T) {
 	stateIDs := stateProperties["entity_id"].(map[string]any)["enum"].([]string)
 	if !slices.Contains(stateIDs, "weather.forecast_home") {
 		t.Fatalf("weather missing from state tool: %#v", stateIDs)
+	}
+}
+
+func TestToolResultForModelUsesExactWeatherConfirmation(t *testing.T) {
+	call := liveapi.ToolCall{
+		Name: "get_home_state",
+		Args: map[string]any{"entity_id": "weather.forecast_home"},
+	}
+	payload := map[string]any{
+		"ok": true, "entityId": "weather.forecast_home", "state": "clear-night",
+		"temperature": 14.4, "temperatureUnit": "°C", "humidity": 87.0,
+	}
+	result := toolResultForModel(call, payload, nil)
+	if result["confirmation"] != "Сейчас ясно, 14.4 °C." {
+		t.Fatalf("unexpected weather confirmation: %#v", result)
 	}
 }

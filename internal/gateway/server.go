@@ -307,8 +307,65 @@ func toolResultForModel(call liveapi.ToolCall, payload map[string]any, err error
 		entityID, _ := call.Args["entity_id"].(string)
 		action, _ := call.Args["action"].(string)
 		result["confirmation"] = actionConfirmation(entityID, action, call.Args["temperature"])
+	} else if call.Name == "get_home_state" {
+		entityID, _ := call.Args["entity_id"].(string)
+		result["confirmation"] = stateConfirmation(entityID, payload)
 	}
 	return result
+}
+
+func stateConfirmation(entityID string, payload map[string]any) string {
+	domain, _, _ := strings.Cut(entityID, ".")
+	state, _ := payload["state"].(string)
+	switch domain {
+	case "weather":
+		condition := weatherCondition(state)
+		if temperature, ok := payload["temperature"].(float64); ok {
+			unit, _ := payload["temperatureUnit"].(string)
+			if unit == "" {
+				unit = "°C"
+			}
+			return fmt.Sprintf("Сейчас %s, %.1f %s.", condition, temperature, unit)
+		}
+		return "Сейчас " + condition + "."
+	case "light":
+		if state == "on" {
+			return "Свет включён."
+		}
+		if state == "off" {
+			return "Свет выключен."
+		}
+	case "climate":
+		if state == "off" {
+			return "Кондиционер выключен."
+		}
+		if temperature, ok := payload["temperature"].(float64); ok && temperature != 0 {
+			return fmt.Sprintf("Кондиционер включён, %.1f °C.", temperature)
+		}
+		return "Кондиционер включён."
+	}
+	name, _ := payload["name"].(string)
+	if name == "" {
+		name = "Устройство"
+	}
+	return fmt.Sprintf("%s: %s.", name, state)
+}
+
+func weatherCondition(condition string) string {
+	translations := map[string]string{
+		"clear-night": "ясно", "sunny": "ясно", "partlycloudy": "переменная облачность",
+		"cloudy": "облачно", "fog": "туман", "hail": "град", "lightning": "гроза",
+		"lightning-rainy": "гроза с дождём", "pouring": "ливень", "rainy": "дождь",
+		"snowy": "снег", "snowy-rainy": "снег с дождём", "windy": "ветрено",
+		"windy-variant": "ветрено и облачно", "exceptional": "необычная погода",
+	}
+	if translated := translations[condition]; translated != "" {
+		return translated
+	}
+	if condition == "" {
+		return "погода неизвестна"
+	}
+	return condition
 }
 
 func actionConfirmation(entityID, action string, temperature any) string {
@@ -381,8 +438,7 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 		"Любой ответ содержит не больше пяти слов.",
 		"Никаких приветствий, объяснений, планов, советов и лишних вопросов.",
 		"Никогда не сообщай о намерении перед вызовом функции: сразу вызывай функцию без текста.",
-		"После результата функции с ok=true и полем confirmation " + verb + " ровно значение confirmation без изменений и ничего больше.",
-		"После get_home_state с ok=true обязательно " + verb + " пользователю краткий ответ по полученным данным.",
+		"После результата любой функции с ok=true и полем confirmation " + verb + " ровно значение confirmation без изменений и ничего больше.",
 		"Обычные вопросы, не относящиеся к управлению домом, не являются ошибкой: ответь на них напрямую без вызова функций.",
 		"Если для ответа нужны актуальные внешние данные, которых у тебя нет, кратко и честно скажи об этом; не проси повторять уже понятный вопрос.",
 		"На вопрос о текущей погоде обязательно вызови get_home_state для weather-сущности; если weather-сущность одна, используй её и для вопроса с названием города.",
