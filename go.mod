@@ -4,6 +4,7 @@ go 1.24
 
 require (
 	github.com/coder/websocket v1.8.14
+	github.com/gen2brain/malgo v0.11.26
 	google.golang.org/genai v1.69.0
 )
 

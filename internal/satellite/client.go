@@ -1,0 +1,231 @@
+package satellite
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+)
+
+type Client struct {
+	Gateway string
+	Output  io.Writer
+}
+
+type event struct {
+	Type     string         `json:"type"`
+	Model    string         `json:"model,omitempty"`
+	Text     string         `json:"text,omitempty"`
+	Data     string         `json:"data,omitempty"`
+	MIMEType string         `json:"mimeType,omitempty"`
+	Name     string         `json:"name,omitempty"`
+	Args     map[string]any `json:"args,omitempty"`
+	Result   map[string]any `json:"result,omitempty"`
+	Message  string         `json:"message,omitempty"`
+}
+
+type outbound struct {
+	Type string `json:"type"`
+	Data string `json:"data,omitempty"`
+	Text string `json:"text,omitempty"`
+}
+
+func (client Client) RunText(ctx context.Context, command string) error {
+	connection, err := client.connect(ctx, "text")
+	if err != nil {
+		return err
+	}
+	defer connection.Close(websocket.StatusNormalClosure, "done")
+
+	ready, err := receive(ctx, connection)
+	if err != nil {
+		return err
+	}
+	if ready.Type != "ready" {
+		return eventError(ready)
+	}
+	fprintf(client.Output, "Подключено: %s\n", ready.Model)
+	if err := wsjson.Write(ctx, connection, outbound{Type: "text", Text: command}); err != nil {
+		return err
+	}
+	return client.receiveTurn(ctx, connection, nil)
+}
+
+func (client Client) RunVoice(ctx context.Context) error {
+	connection, err := client.connect(ctx, "audio")
+	if err != nil {
+		return err
+	}
+	defer connection.Close(websocket.StatusNormalClosure, "done")
+
+	ready, err := receive(ctx, connection)
+	if err != nil {
+		return err
+	}
+	if ready.Type != "ready" {
+		return eventError(ready)
+	}
+	fprintf(client.Output, "Подключено: %s\n", ready.Model)
+
+	audio, err := NewAudio()
+	if err != nil {
+		return fmt.Errorf("аудио: %w", err)
+	}
+	defer audio.Close()
+	if err := audio.Start(); err != nil {
+		return fmt.Errorf("запуск аудио: %w", err)
+	}
+	fprintf(client.Output, "Слушаю. Скажи команду…\n")
+
+	writeCtx, stopWriter := context.WithCancel(ctx)
+	defer stopWriter()
+	writerErrors := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-writeCtx.Done():
+				writerErrors <- nil
+				return
+			case chunk := <-audio.Input():
+				err := wsjson.Write(writeCtx, connection, outbound{
+					Type: "audio",
+					Data: base64.StdEncoding.EncodeToString(chunk),
+				})
+				if err != nil {
+					writerErrors <- err
+					return
+				}
+			}
+		}
+	}()
+
+	err = client.receiveTurn(ctx, connection, audio)
+	stopWriter()
+	select {
+	case writerErr := <-writerErrors:
+		if err == nil && writerErr != nil && !isNormalClose(writerErr) {
+			err = writerErr
+		}
+	case <-time.After(time.Second):
+	}
+	return err
+}
+
+func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn, audio *Audio) error {
+	toolExecuted := false
+	mutedForReply := false
+	var printMu sync.Mutex
+	for {
+		message, err := receive(ctx, connection)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || isNormalClose(err) {
+				return nil
+			}
+			return err
+		}
+		switch message.Type {
+		case "input_transcript":
+			fprintf(client.Output, "Ты: %s\n", strings.TrimSpace(message.Text))
+		case "output_transcript":
+			if audio != nil && !mutedForReply {
+				audio.Listen(false)
+				mutedForReply = true
+			}
+			fprintf(client.Output, "Ассистент: %s\n", strings.TrimSpace(message.Text))
+		case "text_delta":
+			if audio == nil {
+				printMu.Lock()
+				fmt.Fprint(client.Output, message.Text)
+				printMu.Unlock()
+			}
+		case "audio_delta":
+			if audio != nil {
+				if !mutedForReply {
+					audio.Listen(false)
+					mutedForReply = true
+				}
+				data, decodeErr := base64.StdEncoding.DecodeString(message.Data)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				audio.Play(data)
+			}
+		case "tool_call":
+			toolExecuted = true
+			if audio != nil {
+				audio.Listen(false)
+				mutedForReply = true
+			}
+			fprintf(client.Output, "Дом: %s %v\n", message.Name, message.Args)
+		case "ha_result":
+			fprintf(client.Output, "Home Assistant: %s\n", compactJSON(message.Result))
+		case "error":
+			return eventError(message)
+		case "closed":
+			return errors.New("gateway закрыл Live-сессию")
+		case "turn_complete":
+			if audio != nil {
+				audio.WaitPlayback(6 * time.Second)
+			}
+			if toolExecuted || audio == nil {
+				return nil
+			}
+			mutedForReply = false
+			audio.Listen(true)
+			fprintf(client.Output, "Слушаю уточнение…\n")
+		}
+	}
+}
+
+func (client Client) connect(ctx context.Context, responseMode string) (*websocket.Conn, error) {
+	endpoint, err := url.Parse(client.Gateway)
+	if err != nil {
+		return nil, err
+	}
+	query := endpoint.Query()
+	query.Set("response_mode", responseMode)
+	endpoint.RawQuery = query.Encode()
+	connection, _, err := websocket.Dial(ctx, endpoint.String(), nil)
+	return connection, err
+}
+
+func receive(ctx context.Context, connection *websocket.Conn) (event, error) {
+	var message event
+	err := wsjson.Read(ctx, connection, &message)
+	return message, err
+}
+
+func eventError(message event) error {
+	if message.Message != "" {
+		return errors.New(message.Message)
+	}
+	return fmt.Errorf("неожиданное сообщение gateway: %s", message.Type)
+}
+
+func compactJSON(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprint(value)
+	}
+	return string(data)
+}
+
+func fprintf(output io.Writer, format string, values ...any) {
+	if output != nil {
+		_, _ = fmt.Fprintf(output, format, values...)
+	}
+}
+
+func isNormalClose(err error) bool {
+	status := websocket.CloseStatus(err)
+	return status == websocket.StatusNormalClosure || status == websocket.StatusGoingAway || status == websocket.StatusNoStatusRcvd
+}
