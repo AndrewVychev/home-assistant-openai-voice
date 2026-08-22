@@ -21,8 +21,9 @@ func main() {
 	gateway := flag.String("gateway", "ws://127.0.0.1:3000/gemini-live", "WebSocket URL Go gateway")
 	timeout := flag.Duration("timeout", 45*time.Second, "максимальная длительность одной сессии")
 	wakeAssets := flag.String("wake-assets", "", "каталог моделей и ONNX Runtime")
-	wakeThreshold := flag.Float64("wake-threshold", 0.70, "порог Hey Jarvis от 0 до 1")
-	vadThreshold := flag.Float64("vad-threshold", 0.50, "порог голосовой активности от 0 до 1")
+	wakeThreshold := flag.Float64("wake-threshold", 0.50, "порог Hey Jarvis от 0 до 1")
+	vadThreshold := flag.Float64("vad-threshold", 0.25, "порог голосовой активности от 0 до 1")
+	wakeDebug := flag.Bool("wake-debug", false, "показывать максимальный wake score раз в секунду")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -41,6 +42,7 @@ func main() {
 			AssetsDir:      assets,
 			Threshold:      float32(*wakeThreshold),
 			VADThreshold:   float32(*vadThreshold),
+			Debug:          *wakeDebug,
 			SessionTimeout: *timeout,
 		})
 	case "voice":

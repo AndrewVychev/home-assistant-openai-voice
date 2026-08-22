@@ -26,6 +26,7 @@ type WakeConfig struct {
 	AssetsDir      string
 	Threshold      float32
 	VADThreshold   float32
+	Debug          bool
 	SessionTimeout time.Duration
 }
 
@@ -140,7 +141,7 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 	defer detector.Close()
 
 	for {
-		if err := client.waitForWake(ctx, detector); err != nil {
+		if err := client.waitForWake(ctx, detector, config.Debug); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
@@ -160,7 +161,7 @@ func (client Client) RunWake(ctx context.Context, config WakeConfig) error {
 	}
 }
 
-func (client Client) waitForWake(ctx context.Context, detector *wakeword.Detector) error {
+func (client Client) waitForWake(ctx context.Context, detector *wakeword.Detector, debug bool) error {
 	audio, err := NewAudio()
 	if err != nil {
 		return fmt.Errorf("wake audio: %w", err)
@@ -170,6 +171,8 @@ func (client Client) waitForWake(ctx context.Context, detector *wakeword.Detecto
 		return fmt.Errorf("wake audio start: %w", err)
 	}
 	fprintf(client.Output, "Жду: «Хей, Джарвис»…\n")
+	debugStarted := time.Now()
+	var debugMaximum float32
 	for {
 		select {
 		case <-ctx.Done():
@@ -185,6 +188,16 @@ func (client Client) waitForWake(ctx context.Context, detector *wakeword.Detecto
 				audio.PlayWakeChime()
 				audio.WaitPlayback(time.Second)
 				return nil
+			}
+			if debug {
+				if score > debugMaximum {
+					debugMaximum = score
+				}
+				if time.Since(debugStarted) >= time.Second {
+					fprintf(client.Output, "wake max score: %.3f\n", debugMaximum)
+					debugMaximum = 0
+					debugStarted = time.Now()
+				}
 			}
 		}
 	}

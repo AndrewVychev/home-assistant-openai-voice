@@ -23,7 +23,7 @@ func TestOfficialHeyJarvisModelSuppressesSilence(t *testing.T) {
 	if assets == "" {
 		t.Skip("set HOMEVOICE_WAKE_ASSETS to run ONNX integration test")
 	}
-	detector, err := New(Config{AssetsDir: assets, Threshold: 0.70, VADThreshold: 0.50})
+	detector, err := New(Config{AssetsDir: assets, Threshold: 0.50, VADThreshold: 0.25})
 	if err != nil {
 		t.Fatal(err)
 	}
