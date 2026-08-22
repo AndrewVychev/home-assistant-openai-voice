@@ -17,6 +17,7 @@ const lastCost = document.querySelector("#last-cost");
 const totalCost = document.querySelector("#total-cost");
 const usageDetails = document.querySelector("#usage-details");
 const responseModeSelect = document.querySelector("#response-mode");
+const providerSelect = document.querySelector("#provider");
 
 let liveSocket;
 let microphoneStream;
@@ -38,6 +39,7 @@ let wakeModelReady = false;
 let wakeRestartTimer;
 let wakeSessionTimer;
 let sessionResponseMode = "text";
+let sessionProvider = "gemini";
 let turnToolExecuted = false;
 let inputTranscript = "";
 let outputTranscript = "";
@@ -70,12 +72,13 @@ function formatTokens(value) {
 
 function recordUsage(usage) {
   lastUsage = usage;
-  const input = usage.promptTokenCount || 0;
-  const output = usage.responseTokenCount || 0;
+  const input = usage.promptTokenCount || usage.input_tokens || 0;
+  const output = usage.responseTokenCount || usage.output_tokens || 0;
+  const total = usage.totalTokenCount || usage.total_tokens || input + output;
   lastCost.textContent = formatTokens(input + output);
-  totalCost.textContent = "см. Google Billing";
-  usageDetails.textContent = `вход ${formatTokens(input)} · выход ${formatTokens(output)} · всего ${formatTokens(usage.totalTokenCount)}`;
-  console.info("Gemini Live usage", usage);
+  totalCost.textContent = "см. billing";
+  usageDetails.textContent = `вход ${formatTokens(input)} · выход ${formatTokens(output)} · всего ${formatTokens(total)}`;
+  console.info("Live API usage", usage);
 }
 
 function playWakeChime() {
@@ -285,13 +288,15 @@ async function checkHealth() {
   try {
     const response = await fetch("/api/health");
     const health = await response.json();
-    statusText.dataset.model = health.model || "";
-    if (health.ok) {
-      setStatus(`Готов · ${health.model}`, "ok");
+    const selected = providerSelect.value;
+    const provider = health.providers?.[selected];
+    statusText.dataset.model = provider?.model || health.model || "";
+    if (health.homeAssistant?.authenticated && provider?.configured) {
+      setStatus(`Готов · ${selected} · ${provider.model}`, "ok");
       return;
     }
     const missing = [];
-    if (!health.google?.configured) missing.push("GEMINI_API_KEY");
+    if (!provider?.configured) missing.push(selected === "openai" ? "OPENAI_API_KEY" : "GEMINI_API_KEY");
     if (!health.homeAssistant?.authenticated) missing.push("HA_TOKEN");
     setStatus(`Нужна настройка: ${missing.join(", ") || "проверь Home Assistant"}`, "error");
   } catch {
@@ -375,14 +380,15 @@ function flushTurnMessages() {
   textResponse = "";
 }
 
-function handleGeminiEvent(event) {
+function handleLiveEvent(event) {
   if (event.type === "ready") {
     statusText.dataset.model = event.model;
+    sessionProvider = event.provider || sessionProvider;
     setStatus("Слушаю…", "ok");
     connectButton.classList.add("connected");
     buttonLabel.textContent = "Завершить";
     muteButton.disabled = false;
-    addMessage("Система", "Gemini Live-сессия запущена.");
+    addMessage("Система", `${sessionProvider} Live-сессия запущена.`);
     startAudioCapture().catch((error) => {
       addMessage("Ошибка", error.message, "error");
       stopSession(false);
@@ -405,6 +411,7 @@ function handleGeminiEvent(event) {
     playPcmChunk(event.data, event.mimeType).catch(console.error);
   } else if (event.type === "tool_call") {
     turnToolExecuted = true;
+    textResponse = "";
     clearTimeout(wakeSessionTimer);
     const args = event.args || {};
     addMessage("Дом", `Выполняю: ${args.action || "get_state"} → ${args.entity_id || "неизвестная сущность"}`);
@@ -430,8 +437,8 @@ function handleGeminiEvent(event) {
       scheduleSessionTimeout(15_000);
     }
   } else if (event.type === "error") {
-    addMessage("Gemini", event.message || "Ошибка Gemini Live API", "error");
-    setStatus(event.message || "Ошибка Gemini Live API", "error");
+    addMessage(sessionProvider, event.message || "Ошибка Live API", "error");
+    setStatus(event.message || "Ошибка Live API", "error");
   }
 }
 
@@ -439,12 +446,14 @@ async function startSession() {
   if (connecting || liveSocket) return;
   connecting = true;
   sessionResponseMode = responseModeSelect.value;
+  sessionProvider = providerSelect.value;
   turnToolExecuted = false;
   inputTranscript = "";
   outputTranscript = "";
   textResponse = "";
   connectButton.disabled = true;
   responseModeSelect.disabled = true;
+  providerSelect.disabled = true;
   buttonLabel.textContent = "Подключаю…";
   setStatus("Запрашиваю микрофон…");
   if (wakeListening) await stopWakeListening();
@@ -454,18 +463,19 @@ async function startSession() {
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${location.host}/gemini-live?response_mode=${encodeURIComponent(sessionResponseMode)}`);
+    const query = new URLSearchParams({ response_mode: sessionResponseMode, provider: sessionProvider });
+    const socket = new WebSocket(`${protocol}//${location.host}/live?${query}`);
     liveSocket = socket;
     socket.addEventListener("message", (message) => {
       if (liveSocket !== socket) return;
       try {
-        handleGeminiEvent(JSON.parse(message.data));
+        handleLiveEvent(JSON.parse(message.data));
       } catch (error) {
-        console.error("Invalid Gemini event", error);
+        console.error("Invalid Live event", error);
       }
     });
     socket.addEventListener("error", () => {
-      setStatus("Ошибка WebSocket Gemini", "error");
+      setStatus("Ошибка WebSocket Live API", "error");
     });
     socket.addEventListener("close", () => {
       if (liveSocket === socket) stopSession(false);
@@ -504,6 +514,7 @@ function stopSession(showMessage = true) {
   muted = false;
   muteButton.disabled = true;
   responseModeSelect.disabled = false;
+  providerSelect.disabled = false;
   muteButton.textContent = "Выключить микрофон";
   connectButton.classList.remove("connected", "speaking");
   buttonLabel.textContent = "Начать";
@@ -540,6 +551,7 @@ muteButton.addEventListener("click", () => {
 });
 
 clearButton.addEventListener("click", () => messages.replaceChildren());
+providerSelect.addEventListener("change", checkHealth);
 window.addEventListener("beforeunload", () => {
   wakeEnabled = false;
   stopWakeListening();

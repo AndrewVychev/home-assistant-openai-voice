@@ -11,7 +11,6 @@ import (
 	"math"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -20,8 +19,9 @@ import (
 )
 
 type Client struct {
-	Gateway string
-	Output  io.Writer
+	Gateway  string
+	Provider string
+	Output   io.Writer
 }
 
 type WakeConfig struct {
@@ -35,6 +35,7 @@ type WakeConfig struct {
 
 type event struct {
 	Type     string         `json:"type"`
+	Provider string         `json:"provider,omitempty"`
 	Model    string         `json:"model,omitempty"`
 	Text     string         `json:"text,omitempty"`
 	Data     string         `json:"data,omitempty"`
@@ -65,7 +66,7 @@ func (client Client) RunText(ctx context.Context, command string) error {
 	if ready.Type != "ready" {
 		return eventError(ready)
 	}
-	fprintf(client.Output, "Подключено: %s\n", ready.Model)
+	fprintf(client.Output, "Подключено: %s · %s\n", ready.Provider, ready.Model)
 	if err := wsjson.Write(ctx, connection, outbound{Type: "text", Text: command}); err != nil {
 		return err
 	}
@@ -86,7 +87,7 @@ func (client Client) RunVoice(ctx context.Context) error {
 	if ready.Type != "ready" {
 		return eventError(ready)
 	}
-	fprintf(client.Output, "Подключено: %s\n", ready.Model)
+	fprintf(client.Output, "Подключено: %s · %s\n", ready.Provider, ready.Model)
 
 	audio, err := NewAudio()
 	if err != nil {
@@ -238,7 +239,7 @@ func pcmPeakDBFS(data []byte) float64 {
 func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn, audio *Audio) error {
 	toolExecuted := false
 	mutedForReply := false
-	var printMu sync.Mutex
+	var textResponse strings.Builder
 	for {
 		message, err := receive(ctx, connection)
 		if err != nil {
@@ -258,9 +259,7 @@ func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn
 			fprintf(client.Output, "Ассистент: %s\n", strings.TrimSpace(message.Text))
 		case "text_delta":
 			if audio == nil {
-				printMu.Lock()
-				fmt.Fprint(client.Output, message.Text)
-				printMu.Unlock()
+				textResponse.WriteString(message.Text)
 			}
 		case "audio_delta":
 			if audio != nil {
@@ -276,6 +275,7 @@ func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn
 			}
 		case "tool_call":
 			toolExecuted = true
+			textResponse.Reset()
 			if audio != nil {
 				audio.Listen(false)
 				mutedForReply = true
@@ -288,6 +288,9 @@ func (client Client) receiveTurn(ctx context.Context, connection *websocket.Conn
 		case "closed":
 			return errors.New("gateway закрыл Live-сессию")
 		case "turn_complete":
+			if audio == nil && textResponse.Len() > 0 {
+				fprintf(client.Output, "%s\n", strings.TrimSpace(textResponse.String()))
+			}
 			if audio != nil {
 				audio.WaitPlayback(6 * time.Second)
 			}
@@ -308,6 +311,9 @@ func (client Client) connect(ctx context.Context, responseMode string) (*websock
 	}
 	query := endpoint.Query()
 	query.Set("response_mode", responseMode)
+	if client.Provider != "" {
+		query.Set("provider", client.Provider)
+	}
 	endpoint.RawQuery = query.Encode()
 	connection, _, err := websocket.Dial(ctx, endpoint.String(), nil)
 	return connection, err

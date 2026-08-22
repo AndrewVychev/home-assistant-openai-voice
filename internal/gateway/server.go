@@ -15,16 +15,17 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"google.golang.org/genai"
 	"homevoice/internal/config"
 	"homevoice/internal/guard"
 	"homevoice/internal/homeassistant"
+	liveapi "homevoice/internal/live"
 )
 
 type Server struct {
-	config config.Config
-	home   *homeassistant.Client
-	logger *log.Logger
+	config    config.Config
+	home      *homeassistant.Client
+	logger    *log.Logger
+	providers map[string]liveapi.Provider
 }
 
 type clientEvent struct {
@@ -39,8 +40,10 @@ type socketWriter struct {
 }
 
 type liveSession struct {
-	session             *genai.Session
-	mu                  sync.Mutex
+	session             liveapi.Session
+	sendMu              sync.Mutex
+	transcriptMu        sync.Mutex
+	closeOnce           sync.Once
 	lastInputTranscript string
 }
 
@@ -49,6 +52,10 @@ func New(cfg config.Config, logger *log.Logger) *Server {
 		config: cfg,
 		home:   homeassistant.New(cfg.HAURL, cfg.HAToken),
 		logger: logger,
+		providers: map[string]liveapi.Provider{
+			"gemini": liveapi.NewGemini(cfg.GeminiAPIKey, cfg.GeminiModel),
+			"openai": liveapi.NewOpenAI(cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIVoice),
+		},
 	}
 }
 
@@ -56,7 +63,8 @@ func (server *Server) Handler(projectRoot string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
 	mux.HandleFunc("POST /api/ha/entity", server.homeAction)
-	mux.HandleFunc("GET /gemini-live", server.geminiLive)
+	mux.HandleFunc("GET /live", server.live)
+	mux.HandleFunc("GET /gemini-live", server.live)
 	mux.Handle("/vendor/tfjs/", http.StripPrefix("/vendor/tfjs/", http.FileServer(http.Dir(filepath.Join(projectRoot, "node_modules/@tensorflow/tfjs/dist")))))
 	mux.Handle("/vendor/speech-commands/", http.StripPrefix("/vendor/speech-commands/", http.FileServer(http.Dir(filepath.Join(projectRoot, "node_modules/@tensorflow-models/speech-commands/dist")))))
 	mux.Handle("/", http.FileServer(http.Dir(filepath.Join(projectRoot, "public"))))
@@ -68,9 +76,15 @@ func (server *Server) health(response http.ResponseWriter, request *http.Request
 	defer cancel()
 
 	haReady := server.home.Configured() && server.home.Health(ctx)
-	googleReady := strings.TrimSpace(server.config.GeminiAPIKey) != ""
+	providerStatus := make(map[string]any, len(server.providers))
+	anyProviderReady := false
+	for id, provider := range server.providers {
+		configured := provider.Configured()
+		anyProviderReady = anyProviderReady || configured
+		providerStatus[id] = map[string]any{"configured": configured, "model": provider.Model()}
+	}
 	status := http.StatusOK
-	if !haReady || !googleReady {
+	if !haReady || !anyProviderReady {
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(response, status, map[string]any{
@@ -80,9 +94,10 @@ func (server *Server) health(response http.ResponseWriter, request *http.Request
 			"reachable":     haReady,
 			"authenticated": haReady,
 		},
-		"google":  map[string]bool{"configured": googleReady},
-		"model":   server.config.GeminiModel,
-		"pricing": nil,
+		"provider":  server.config.DefaultProvider,
+		"providers": providerStatus,
+		"model":     server.providers[server.config.DefaultProvider].Model(),
+		"pricing":   nil,
 	})
 }
 
@@ -108,7 +123,7 @@ func (server *Server) homeAction(response http.ResponseWriter, request *http.Req
 	writeJSON(response, http.StatusOK, result)
 }
 
-func (server *Server) geminiLive(response http.ResponseWriter, request *http.Request) {
+func (server *Server) live(response http.ResponseWriter, request *http.Request) {
 	connection, err := websocket.Accept(response, request, &websocket.AcceptOptions{
 		OriginPatterns: []string{"localhost:*", "127.0.0.1:*"},
 	})
@@ -120,8 +135,21 @@ func (server *Server) geminiLive(response http.ResponseWriter, request *http.Req
 	writer := &socketWriter{connection: connection}
 	defer connection.Close(websocket.StatusNormalClosure, "session ended")
 
-	if strings.TrimSpace(server.config.GeminiAPIKey) == "" {
-		writer.send(request.Context(), map[string]any{"type": "error", "message": "Добавьте GEMINI_API_KEY в .env"})
+	providerID := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("provider")))
+	if providerID == "" {
+		if request.URL.Path == "/gemini-live" {
+			providerID = "gemini"
+		} else {
+			providerID = server.config.DefaultProvider
+		}
+	}
+	provider, ok := server.providers[providerID]
+	if !ok {
+		writer.send(request.Context(), map[string]any{"type": "error", "message": "Неизвестный voice provider: " + providerID})
+		return
+	}
+	if !provider.Configured() {
+		writer.send(request.Context(), map[string]any{"type": "error", "message": "Добавьте " + providerKeyName(providerID) + " в .env"})
 		return
 	}
 
@@ -137,31 +165,30 @@ func (server *Server) geminiLive(response http.ResponseWriter, request *http.Req
 		responseMode = "audio"
 	}
 
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey:  server.config.GeminiAPIKey,
-		Backend: genai.BackendGeminiAPI,
+	session, err := provider.Connect(ctx, liveapi.SessionConfig{
+		Instructions: buildInstructions(entities, responseMode),
+		ResponseMode: responseMode,
+		Tools:        buildTools(entities),
+		Vocabulary:   transcriptionVocabulary(entities),
 	})
 	if err != nil {
 		writer.send(ctx, map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
-	session, err := client.Live.Connect(ctx, server.config.GeminiModel, liveConfig(entities, responseMode))
-	if err != nil {
-		writer.send(ctx, map[string]any{"type": "error", "message": err.Error()})
-		return
-	}
-	live := &liveSession{session: session}
-	defer live.close()
-	writer.send(ctx, map[string]any{"type": "ready", "model": server.config.GeminiModel, "responseMode": responseMode})
+	conversation := &liveSession{session: session}
+	defer conversation.close()
+	writer.send(ctx, map[string]any{
+		"type": "ready", "provider": provider.ID(), "model": provider.Model(), "responseMode": responseMode,
+	})
 
 	readErrors := make(chan error, 1)
 	go func() {
-		readErrors <- server.readBrowser(ctx, connection, live)
-		live.close()
+		readErrors <- server.readBrowser(ctx, connection, conversation)
+		conversation.close()
 	}()
 
 	for {
-		message, receiveErr := live.receive()
+		message, receiveErr := conversation.receive()
 		if receiveErr != nil {
 			select {
 			case browserErr := <-readErrors:
@@ -170,16 +197,16 @@ func (server *Server) geminiLive(response http.ResponseWriter, request *http.Req
 				}
 			default:
 				if !isNormalClose(receiveErr) && !errors.Is(receiveErr, context.Canceled) {
-					writer.send(ctx, map[string]any{"type": "error", "message": "Gemini Live: " + receiveErr.Error()})
+					writer.send(ctx, map[string]any{"type": "error", "message": provider.ID() + " Live: " + receiveErr.Error()})
 				}
 			}
 			return
 		}
-		server.relayMessage(ctx, writer, live, message, responseMode)
+		server.relayMessage(ctx, writer, conversation, message, responseMode)
 	}
 }
 
-func (server *Server) readBrowser(ctx context.Context, connection *websocket.Conn, live *liveSession) error {
+func (server *Server) readBrowser(ctx context.Context, connection *websocket.Conn, conversation *liveSession) error {
 	for {
 		var event clientEvent
 		if err := wsjson.Read(ctx, connection, &event); err != nil {
@@ -191,21 +218,17 @@ func (server *Server) readBrowser(ctx context.Context, connection *websocket.Con
 			if err != nil {
 				return fmt.Errorf("decode browser audio: %w", err)
 			}
-			if err := live.sendRealtime(genai.LiveRealtimeInput{Audio: &genai.Blob{Data: data, MIMEType: "audio/pcm;rate=16000"}}); err != nil {
+			if err := conversation.sendAudio(data); err != nil {
 				return err
 			}
 		case "audio_stream_end":
-			if err := live.sendRealtime(genai.LiveRealtimeInput{AudioStreamEnd: true}); err != nil {
+			if err := conversation.endAudio(); err != nil {
 				return err
 			}
 		case "text":
 			if strings.TrimSpace(event.Text) != "" {
-				live.setInputTranscript(event.Text)
-				complete := true
-				if err := live.sendContent(genai.LiveClientContentInput{
-					Turns:        []*genai.Content{genai.NewContentFromText(event.Text, genai.RoleUser)},
-					TurnComplete: &complete,
-				}); err != nil {
+				conversation.setInputTranscript(event.Text)
+				if err := conversation.sendText(event.Text); err != nil {
 					return err
 				}
 			}
@@ -213,51 +236,36 @@ func (server *Server) readBrowser(ctx context.Context, connection *websocket.Con
 	}
 }
 
-func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, live *liveSession, message *genai.LiveServerMessage, responseMode string) {
-	content := message.ServerContent
-	if content != nil {
-		if content.InputTranscription != nil && content.InputTranscription.Text != "" {
-			live.setInputTranscript(content.InputTranscription.Text)
-			writer.send(ctx, map[string]any{"type": "input_transcript", "text": content.InputTranscription.Text})
+func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, conversation *liveSession, event liveapi.Event, responseMode string) {
+	switch event.Kind {
+	case liveapi.EventInputTranscript:
+		conversation.setInputTranscript(event.Text)
+		writer.send(ctx, map[string]any{"type": string(event.Kind), "text": event.Text})
+	case liveapi.EventOutputTranscript, liveapi.EventTextDelta:
+		writer.send(ctx, map[string]any{"type": string(event.Kind), "text": event.Text})
+	case liveapi.EventAudioDelta:
+		if responseMode == "audio" && len(event.Audio) > 0 {
+			writer.send(ctx, map[string]any{
+				"type": string(event.Kind), "data": base64.StdEncoding.EncodeToString(event.Audio),
+				"mimeType": valueOr(event.MIMEType, "audio/pcm;rate=24000"),
+			})
 		}
-		if content.OutputTranscription != nil && content.OutputTranscription.Text != "" {
-			writer.send(ctx, map[string]any{"type": "output_transcript", "text": content.OutputTranscription.Text})
-		}
-		if content.ModelTurn != nil {
-			for _, part := range content.ModelTurn.Parts {
-				if part.Text != "" {
-					writer.send(ctx, map[string]any{"type": "text_delta", "text": part.Text})
-				}
-				if responseMode == "audio" && part.InlineData != nil && len(part.InlineData.Data) > 0 {
-					writer.send(ctx, map[string]any{
-						"type":     "audio_delta",
-						"data":     base64.StdEncoding.EncodeToString(part.InlineData.Data),
-						"mimeType": valueOr(part.InlineData.MIMEType, "audio/pcm;rate=24000"),
-					})
-				}
-			}
-		}
-		if content.Interrupted {
-			writer.send(ctx, map[string]string{"type": "interrupted"})
-		}
-		if content.WaitingForInput {
-			writer.send(ctx, map[string]string{"type": "waiting_for_input"})
-		}
-		if content.TurnComplete {
-			writer.send(ctx, map[string]any{"type": "turn_complete", "reason": content.TurnCompleteReason})
-			live.setInputTranscript("")
-		}
-	}
-	if message.UsageMetadata != nil {
-		writer.send(ctx, map[string]any{"type": "usage", "usage": message.UsageMetadata})
-	}
-	if message.ToolCall != nil && len(message.ToolCall.FunctionCalls) > 0 {
-		server.executeTools(ctx, writer, live, message.ToolCall.FunctionCalls)
+	case liveapi.EventToolCall:
+		server.executeTools(ctx, writer, conversation, event.ToolCalls)
+	case liveapi.EventUsage:
+		writer.send(ctx, map[string]any{"type": string(event.Kind), "usage": event.Usage})
+	case liveapi.EventTurnComplete:
+		writer.send(ctx, map[string]any{"type": string(event.Kind), "reason": event.Reason})
+		conversation.setInputTranscript("")
+	case liveapi.EventInterrupted, liveapi.EventWaitingForInput:
+		writer.send(ctx, map[string]any{"type": string(event.Kind)})
+	case liveapi.EventError:
+		writer.send(ctx, map[string]any{"type": "error", "message": event.Text})
 	}
 }
 
-func (server *Server) executeTools(ctx context.Context, writer *socketWriter, live *liveSession, calls []*genai.FunctionCall) {
-	responses := make([]*genai.FunctionResponse, 0, len(calls))
+func (server *Server) executeTools(ctx context.Context, writer *socketWriter, conversation *liveSession, calls []liveapi.ToolCall) {
+	responses := make([]liveapi.ToolResult, 0, len(calls))
 	for _, call := range calls {
 		if call.Name != "control_home_entity" && call.Name != "get_home_state" {
 			continue
@@ -270,12 +278,10 @@ func (server *Server) executeTools(ctx context.Context, writer *socketWriter, li
 		}
 		temperature, _ := call.Args["temperature"].(float64)
 		if call.Name == "control_home_entity" {
-			if err := guard.ValidateTranscriptAction(live.inputTranscript(), action); err != nil {
+			if err := guard.ValidateTranscriptAction(conversation.inputTranscript(), action); err != nil {
 				payload := map[string]any{"ok": false, "error": err.Error(), "rejected": true}
 				writer.send(ctx, map[string]any{"type": "ha_result", "result": payload})
-				responses = append(responses, &genai.FunctionResponse{
-					ID: call.ID, Name: call.Name, Response: map[string]any{"error": err.Error()},
-				})
+				responses = append(responses, liveapi.ToolResult{ID: call.ID, Name: call.Name, Output: map[string]any{"error": err.Error()}})
 				continue
 			}
 		}
@@ -292,30 +298,12 @@ func (server *Server) executeTools(ctx context.Context, writer *socketWriter, li
 		if err != nil {
 			response = map[string]any{"error": err.Error()}
 		}
-		responses = append(responses, &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: response})
+		responses = append(responses, liveapi.ToolResult{ID: call.ID, Name: call.Name, Output: response})
 	}
 	if len(responses) > 0 {
-		if err := live.sendTools(genai.LiveToolResponseInput{FunctionResponses: responses}); err != nil {
+		if err := conversation.sendToolResults(responses); err != nil {
 			writer.send(ctx, map[string]any{"type": "error", "message": err.Error()})
 		}
-	}
-}
-
-func liveConfig(entities []homeassistant.Entity, responseMode string) *genai.LiveConnectConfig {
-	temperature := float32(0)
-	return &genai.LiveConnectConfig{
-		ResponseModalities: []genai.Modality{genai.ModalityAudio},
-		Temperature:        &temperature,
-		MaxOutputTokens:    64,
-		ThinkingConfig:     &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal},
-		SpeechConfig:       &genai.SpeechConfig{LanguageCode: "ru-RU"},
-		SystemInstruction:  genai.NewContentFromText(buildInstructions(entities, responseMode), genai.RoleUser),
-		Tools:              buildTools(entities),
-		InputAudioTranscription: &genai.AudioTranscriptionConfig{
-			LanguageCodes:    []string{"ru-RU"},
-			CustomVocabulary: transcriptionVocabulary(entities),
-		},
-		OutputAudioTranscription: &genai.AudioTranscriptionConfig{LanguageCodes: []string{"ru-RU"}},
 	}
 }
 
@@ -363,6 +351,7 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 		"Строго различай противоположные команды: включи означает только turn_on, выключи или отключи означает только turn_off.",
 		"Любой ответ содержит не больше пяти слов.",
 		"Никаких приветствий, объяснений, планов, советов и лишних вопросов.",
+		"Никогда не сообщай о намерении перед вызовом функции: сразу вызывай функцию без текста.",
 		"После успешного действия " + verb + " только краткий итог.",
 		"Если команда неоднозначна, задай ровно один короткий вопрос с вариантами и жди ответа.",
 		"Для управления используй только control_home_entity и get_home_state.",
@@ -378,17 +367,17 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 	}, " ")
 }
 
-func buildTools(entities []homeassistant.Entity) []*genai.Tool {
+func buildTools(entities []homeassistant.Entity) []liveapi.Tool {
 	entityIDs := make([]string, 0, len(entities))
 	for _, entity := range entities {
 		entityIDs = append(entityIDs, entity.EntityID)
 	}
 	entitySchema := map[string]any{"type": "string", "enum": entityIDs}
-	return []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{
+	return []liveapi.Tool{
 		{
 			Name:        "control_home_entity",
 			Description: "Управляет одной разрешённой сущностью Home Assistant.",
-			ParametersJsonSchema: map[string]any{
+			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"entity_id":   entitySchema,
@@ -402,14 +391,14 @@ func buildTools(entities []homeassistant.Entity) []*genai.Tool {
 		{
 			Name:        "get_home_state",
 			Description: "Получает состояние сущности по явному вопросу пользователя.",
-			ParametersJsonSchema: map[string]any{
+			Parameters: map[string]any{
 				"type":                 "object",
 				"properties":           map[string]any{"entity_id": entitySchema},
 				"required":             []string{"entity_id"},
 				"additionalProperties": false,
 			},
 		},
-	}}}
+	}
 }
 
 func (writer *socketWriter) send(ctx context.Context, value any) {
@@ -420,44 +409,52 @@ func (writer *socketWriter) send(ctx context.Context, value any) {
 	_ = wsjson.Write(writeCtx, writer.connection, value)
 }
 
-func (live *liveSession) receive() (*genai.LiveServerMessage, error) {
-	return live.session.Receive()
+func (conversation *liveSession) receive() (liveapi.Event, error) {
+	return conversation.session.Receive()
 }
 
-func (live *liveSession) sendRealtime(input genai.LiveRealtimeInput) error {
-	live.mu.Lock()
-	defer live.mu.Unlock()
-	return live.session.SendRealtimeInput(input)
+func (conversation *liveSession) sendAudio(data []byte) error {
+	conversation.sendMu.Lock()
+	defer conversation.sendMu.Unlock()
+	return conversation.session.SendAudio(data)
 }
 
-func (live *liveSession) sendContent(input genai.LiveClientContentInput) error {
-	live.mu.Lock()
-	defer live.mu.Unlock()
-	return live.session.SendClientContent(input)
+func (conversation *liveSession) endAudio() error {
+	conversation.sendMu.Lock()
+	defer conversation.sendMu.Unlock()
+	return conversation.session.EndAudio()
 }
 
-func (live *liveSession) sendTools(input genai.LiveToolResponseInput) error {
-	live.mu.Lock()
-	defer live.mu.Unlock()
-	return live.session.SendToolResponse(input)
+func (conversation *liveSession) sendText(text string) error {
+	conversation.sendMu.Lock()
+	defer conversation.sendMu.Unlock()
+	return conversation.session.SendText(text)
 }
 
-func (live *liveSession) setInputTranscript(value string) {
-	live.mu.Lock()
-	defer live.mu.Unlock()
-	live.lastInputTranscript = strings.TrimSpace(value)
+func (conversation *liveSession) sendToolResults(results []liveapi.ToolResult) error {
+	conversation.sendMu.Lock()
+	defer conversation.sendMu.Unlock()
+	return conversation.session.SendToolResults(results)
 }
 
-func (live *liveSession) inputTranscript() string {
-	live.mu.Lock()
-	defer live.mu.Unlock()
-	return live.lastInputTranscript
+func (conversation *liveSession) setInputTranscript(value string) {
+	conversation.transcriptMu.Lock()
+	defer conversation.transcriptMu.Unlock()
+	conversation.lastInputTranscript = strings.TrimSpace(value)
 }
 
-func (live *liveSession) close() {
-	live.mu.Lock()
-	defer live.mu.Unlock()
-	_ = live.session.Close()
+func (conversation *liveSession) inputTranscript() string {
+	conversation.transcriptMu.Lock()
+	defer conversation.transcriptMu.Unlock()
+	return conversation.lastInputTranscript
+}
+
+func (conversation *liveSession) close() {
+	conversation.closeOnce.Do(func() {
+		conversation.sendMu.Lock()
+		defer conversation.sendMu.Unlock()
+		_ = conversation.session.Close()
+	})
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {
@@ -488,4 +485,11 @@ func valueOr(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func providerKeyName(providerID string) string {
+	if providerID == "openai" {
+		return "OPENAI_API_KEY"
+	}
+	return "GEMINI_API_KEY"
 }

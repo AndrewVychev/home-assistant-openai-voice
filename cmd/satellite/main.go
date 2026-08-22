@@ -18,7 +18,8 @@ import (
 
 func main() {
 	mode := flag.String("mode", "wake", "wake, wake-test, voice или text")
-	gateway := flag.String("gateway", "ws://127.0.0.1:3000/gemini-live", "WebSocket URL Go gateway")
+	gateway := flag.String("gateway", "ws://127.0.0.1:3000/live", "WebSocket URL Go gateway")
+	provider := flag.String("provider", envOr("VOICE_PROVIDER", "gemini"), "voice provider: gemini или openai")
 	timeout := flag.Duration("timeout", 45*time.Second, "максимальная длительность одной сессии")
 	wakeAssets := flag.String("wake-assets", "", "каталог моделей и ONNX Runtime")
 	wakeThreshold := flag.Float64("wake-threshold", 0.35, "порог Hey Jarvis от 0 до 1")
@@ -28,7 +29,12 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	client := satellite.Client{Gateway: *gateway, Output: os.Stdout}
+	*provider = strings.ToLower(strings.TrimSpace(*provider))
+	if *provider != "gemini" && *provider != "openai" {
+		fmt.Fprintf(os.Stderr, "Ошибка: неизвестный provider %q: используй gemini или openai\n", *provider)
+		os.Exit(1)
+	}
+	client := satellite.Client{Gateway: *gateway, Provider: *provider, Output: os.Stdout}
 
 	var err error
 	switch *mode {
@@ -77,6 +83,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Ошибка:", err)
 		os.Exit(1)
 	}
+}
+
+func envOr(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func resolveWakeAssets(configured string) (string, error) {

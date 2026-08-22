@@ -10,14 +10,22 @@
   <body>
     <main class="shell">
       <section class="card">
-        <div class="eyebrow">Gemini Live × Home Assistant</div>
+        <div class="eyebrow">Live AI × Home Assistant</div>
         <h1>Голос дома</h1>
         <p class="lead">Говори команду голосом и выбери, как ассистент должен ответить.</p>
 
         <label class="mode-picker">
+          <span>Модель</span>
+          <select id="provider">
+            <option value="gemini" selected>Gemini Live</option>
+            <option value="openai">OpenAI Realtime</option>
+          </select>
+        </label>
+
+        <label class="mode-picker">
           <span>Режим ответа</span>
           <select id="response-mode">
-            <option value="audio" selected>Голос Gemini Live</option>
+            <option value="audio" selected>Голос модели</option>
             <option value="text">Только текст</option>
           </select>
         </label>
@@ -51,14 +59,14 @@
           <div id="training-status" class="training-status">Сначала запиши примеры.</div>
         </section>
 
-        <section class="cost-panel" aria-label="Использование Gemini Live API">
+        <section class="cost-panel" aria-label="Использование Live API">
           <div>
             <span>Токенов в turn</span>
             <strong id="last-cost">—</strong>
           </div>
           <div>
             <span>Стоимость</span>
-            <strong id="total-cost">см. Google Billing</strong>
+            <strong id="total-cost">см. billing</strong>
           </div>
           <p id="usage-details">Usage появится после первой команды.</p>
         </section>

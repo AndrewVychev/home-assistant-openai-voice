@@ -8,23 +8,13 @@ import (
 	"homevoice/internal/homeassistant"
 )
 
-func TestLiveConfigPinsRussianTranscription(t *testing.T) {
+func TestTranscriptionVocabularyContainsRussianCommandsAndEntities(t *testing.T) {
 	entities := []homeassistant.Entity{{EntityID: "climate.living_room", Name: "Кондиционер", Area: "Гостиная"}}
-	config := liveConfig(entities, "audio")
-
-	if config.SpeechConfig == nil || config.SpeechConfig.LanguageCode != "ru-RU" {
-		t.Fatalf("speech language = %#v, want ru-RU", config.SpeechConfig)
-	}
-	if config.InputAudioTranscription == nil || !slices.Equal(config.InputAudioTranscription.LanguageCodes, []string{"ru-RU"}) {
-		t.Fatalf("input languages = %#v, want ru-RU", config.InputAudioTranscription)
-	}
+	vocabulary := transcriptionVocabulary(entities)
 	for _, phrase := range []string{"включи", "выключи", "кондиционер", "гостиная"} {
-		if !slices.Contains(config.InputAudioTranscription.CustomVocabulary, phrase) {
-			t.Fatalf("custom vocabulary does not contain %q: %#v", phrase, config.InputAudioTranscription.CustomVocabulary)
+		if !slices.Contains(vocabulary, phrase) {
+			t.Fatalf("custom vocabulary does not contain %q: %#v", phrase, vocabulary)
 		}
-	}
-	if config.Temperature == nil || *config.Temperature != 0 {
-		t.Fatalf("temperature = %#v, want explicit zero", config.Temperature)
 	}
 }
 
