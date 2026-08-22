@@ -121,3 +121,17 @@ func TestToolResultForModelUsesExactWeatherConfirmation(t *testing.T) {
 		t.Fatalf("unexpected weather confirmation: %#v", result)
 	}
 }
+
+func TestToolResultForModelLeavesOrdinaryStateToModel(t *testing.T) {
+	call := liveapi.ToolCall{
+		Name: "get_home_state",
+		Args: map[string]any{"entity_id": "light.hall"},
+	}
+	result := toolResultForModel(call, map[string]any{"ok": true, "state": "on"}, nil)
+	if _, exists := result["confirmation"]; exists {
+		t.Fatalf("ordinary state should not have a hardcoded confirmation: %#v", result)
+	}
+	if result["state"] != "on" {
+		t.Fatalf("ordinary state missing: %#v", result)
+	}
+}

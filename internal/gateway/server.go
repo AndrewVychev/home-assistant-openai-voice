@@ -357,46 +357,25 @@ func toolResultForModel(call liveapi.ToolCall, payload map[string]any, err error
 		result["confirmation"] = actionConfirmation(entityID, action, call.Args["temperature"])
 	} else if call.Name == "get_home_state" {
 		entityID, _ := call.Args["entity_id"].(string)
-		result["confirmation"] = stateConfirmation(entityID, payload)
+		domain, _, _ := strings.Cut(entityID, ".")
+		if domain == "weather" {
+			result["confirmation"] = weatherConfirmation(payload)
+		}
 	}
 	return result
 }
 
-func stateConfirmation(entityID string, payload map[string]any) string {
-	domain, _, _ := strings.Cut(entityID, ".")
+func weatherConfirmation(payload map[string]any) string {
 	state, _ := payload["state"].(string)
-	switch domain {
-	case "weather":
-		condition := weatherCondition(state)
-		if temperature, ok := payload["temperature"].(float64); ok {
-			unit, _ := payload["temperatureUnit"].(string)
-			if unit == "" {
-				unit = "°C"
-			}
-			return fmt.Sprintf("Сейчас %s, %.1f %s.", condition, temperature, unit)
+	condition := weatherCondition(state)
+	if temperature, ok := payload["temperature"].(float64); ok {
+		unit, _ := payload["temperatureUnit"].(string)
+		if unit == "" {
+			unit = "°C"
 		}
-		return "Сейчас " + condition + "."
-	case "light":
-		if state == "on" {
-			return "Свет включён."
-		}
-		if state == "off" {
-			return "Свет выключен."
-		}
-	case "climate":
-		if state == "off" {
-			return "Кондиционер выключен."
-		}
-		if temperature, ok := payload["temperature"].(float64); ok && temperature != 0 {
-			return fmt.Sprintf("Кондиционер включён, %.1f °C.", temperature)
-		}
-		return "Кондиционер включён."
+		return fmt.Sprintf("Сейчас %s, %.1f %s.", condition, temperature, unit)
 	}
-	name, _ := payload["name"].(string)
-	if name == "" {
-		name = "Устройство"
-	}
-	return fmt.Sprintf("%s: %s.", name, state)
+	return "Сейчас " + condition + "."
 }
 
 func weatherCondition(condition string) string {
