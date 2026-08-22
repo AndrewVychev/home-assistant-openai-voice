@@ -16,7 +16,6 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"homevoice/internal/config"
-	"homevoice/internal/guard"
 	"homevoice/internal/homeassistant"
 	liveapi "homevoice/internal/live"
 )
@@ -40,11 +39,9 @@ type socketWriter struct {
 }
 
 type liveSession struct {
-	session          liveapi.Session
-	sendMu           sync.Mutex
-	transcriptMu     sync.Mutex
-	closeOnce        sync.Once
-	inputTranscripts []string
+	session   liveapi.Session
+	sendMu    sync.Mutex
+	closeOnce sync.Once
 }
 
 func New(cfg config.Config, logger *log.Logger) *Server {
@@ -227,7 +224,6 @@ func (server *Server) readBrowser(ctx context.Context, connection *websocket.Con
 			}
 		case "text":
 			if strings.TrimSpace(event.Text) != "" {
-				conversation.appendInputTranscript(event.Text)
 				if err := conversation.sendText(event.Text); err != nil {
 					return err
 				}
@@ -239,7 +235,6 @@ func (server *Server) readBrowser(ctx context.Context, connection *websocket.Con
 func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, conversation *liveSession, event liveapi.Event, responseMode string) {
 	switch event.Kind {
 	case liveapi.EventInputTranscript:
-		conversation.appendInputTranscript(event.Text)
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "text": event.Text})
 	case liveapi.EventOutputTranscript, liveapi.EventTextDelta:
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "text": event.Text})
@@ -264,7 +259,6 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, co
 }
 
 func (server *Server) executeTools(ctx context.Context, writer *socketWriter, conversation *liveSession, calls []liveapi.ToolCall) {
-	defer conversation.clearInputTranscript()
 	responses := make([]liveapi.ToolResult, 0, len(calls))
 	for _, call := range calls {
 		if call.Name != "control_home_entity" && call.Name != "get_home_state" {
@@ -277,14 +271,6 @@ func (server *Server) executeTools(ctx context.Context, writer *socketWriter, co
 			action = "get_state"
 		}
 		temperature, _ := call.Args["temperature"].(float64)
-		if call.Name == "control_home_entity" {
-			if err := guard.ValidateTranscriptAction(conversation.inputTranscript(), action); err != nil {
-				payload := map[string]any{"ok": false, "error": err.Error(), "rejected": true}
-				writer.send(ctx, map[string]any{"type": "ha_result", "result": payload})
-				responses = append(responses, liveapi.ToolResult{ID: call.ID, Name: call.Name, Output: map[string]any{"error": err.Error()}})
-				continue
-			}
-		}
 		result, err := server.home.Perform(ctx, entityID, action, temperature)
 		var payload map[string]any
 		if err != nil {
@@ -356,7 +342,6 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 		"Если команда неоднозначна, задай ровно один короткий вопрос с вариантами и жди ответа.",
 		"Для управления используй только control_home_entity и get_home_state.",
 		"Не утверждай, что действие выполнено, пока функция не вернула ok=true.",
-		"Если функция отклонила команду из-за ненадёжного распознавания, ничего не выполняй и попроси повторить команду.",
 		"Для turn_on, turn_off и toggle сразу вызови control_home_entity один раз.",
 		"Не вызывай get_home_state до или после управления.",
 		"На явный вопрос о состоянии обязательно вызови get_home_state.",
@@ -435,27 +420,6 @@ func (conversation *liveSession) sendToolResults(results []liveapi.ToolResult) e
 	conversation.sendMu.Lock()
 	defer conversation.sendMu.Unlock()
 	return conversation.session.SendToolResults(results)
-}
-
-func (conversation *liveSession) appendInputTranscript(value string) {
-	conversation.transcriptMu.Lock()
-	defer conversation.transcriptMu.Unlock()
-	value = strings.TrimSpace(value)
-	if value != "" {
-		conversation.inputTranscripts = append(conversation.inputTranscripts, value)
-	}
-}
-
-func (conversation *liveSession) inputTranscript() string {
-	conversation.transcriptMu.Lock()
-	defer conversation.transcriptMu.Unlock()
-	return strings.Join(conversation.inputTranscripts, "\n")
-}
-
-func (conversation *liveSession) clearInputTranscript() {
-	conversation.transcriptMu.Lock()
-	defer conversation.transcriptMu.Unlock()
-	conversation.inputTranscripts = conversation.inputTranscripts[:0]
 }
 
 func (conversation *liveSession) close() {

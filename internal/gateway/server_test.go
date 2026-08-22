@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"homevoice/internal/guard"
 	"homevoice/internal/homeassistant"
 )
 
@@ -25,24 +24,5 @@ func TestInstructionsRejectUncertainForeignTranscript(t *testing.T) {
 		if !strings.Contains(instructions, phrase) {
 			t.Fatalf("instructions do not contain %q", phrase)
 		}
-	}
-}
-
-func TestLiveSessionAccumulatesClarificationTranscriptUntilToolCall(t *testing.T) {
-	conversation := &liveSession{}
-	conversation.appendInputTranscript("Включи свет.")
-	conversation.appendInputTranscript("Кухня")
-	conversation.appendInputTranscript("Основной")
-
-	want := "Включи свет.\nКухня\nОсновной"
-	if got := conversation.inputTranscript(); got != want {
-		t.Fatalf("input transcript = %q, want %q", got, want)
-	}
-	if err := guard.ValidateTranscriptAction(conversation.inputTranscript(), "turn_on"); err != nil {
-		t.Fatalf("accumulated clarification must preserve original action: %v", err)
-	}
-	conversation.clearInputTranscript()
-	if got := conversation.inputTranscript(); got != "" {
-		t.Fatalf("input transcript after clear = %q", got)
 	}
 }

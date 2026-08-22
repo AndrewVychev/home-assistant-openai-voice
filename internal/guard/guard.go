@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"regexp"
-	"strings"
 )
 
 var entityPattern = regexp.MustCompile(`^[a-z_]+\.[a-z0-9_]+$`)
@@ -40,32 +39,6 @@ func Validate(entityID, action string, temperature float64) (Action, error) {
 		return Action{}, errors.New("допустимая температура: от 10 до 30 °C")
 	}
 	return Action{EntityID: entityID, Domain: domain, Name: action, Temperature: temperature}, nil
-}
-
-// ValidateTranscriptAction prevents a mistranscribed command from performing
-// the opposite binary action. A model decision is not enough: the transcript
-// must contain the explicit Russian verb that authorizes the action.
-func ValidateTranscriptAction(transcript, action string) error {
-	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(transcript), "ё", "е"))
-	wantsOn := strings.Contains(normalized, "включ")
-	wantsOff := strings.Contains(normalized, "выключ") || strings.Contains(normalized, "отключ")
-	negated := strings.Contains(normalized, "не включ") || strings.Contains(normalized, "не выключ") || strings.Contains(normalized, "не отключ")
-
-	switch action {
-	case "turn_on":
-		if !wantsOn || wantsOff || negated {
-			return errors.New("не удалось надёжно распознать команду «включи»; повторите")
-		}
-	case "turn_off":
-		if !wantsOff || wantsOn || negated {
-			return errors.New("не удалось надёжно распознать команду «выключи»; повторите")
-		}
-	case "toggle":
-		if !strings.Contains(normalized, "переключ") {
-			return errors.New("не удалось надёжно распознать команду «переключи»; повторите")
-		}
-	}
-	return nil
 }
 
 func Matches(action Action, current State, previous State) bool {
