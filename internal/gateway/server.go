@@ -280,16 +280,56 @@ func (server *Server) executeTools(ctx context.Context, writer *socketWriter, co
 			_ = json.Unmarshal(encoded, &payload)
 		}
 		writer.send(ctx, map[string]any{"type": "ha_result", "result": payload})
-		response := map[string]any{"output": payload}
-		if err != nil {
-			response = map[string]any{"error": err.Error()}
-		}
+		response := toolResultForModel(call, payload, err)
 		responses = append(responses, liveapi.ToolResult{ID: call.ID, Name: call.Name, Output: response})
 	}
 	if len(responses) > 0 {
 		if err := conversation.sendToolResults(responses); err != nil {
 			writer.send(ctx, map[string]any{"type": "error", "message": err.Error()})
 		}
+	}
+}
+
+func toolResultForModel(call liveapi.ToolCall, payload map[string]any, err error) map[string]any {
+	if err != nil {
+		return map[string]any{"ok": false, "error": err.Error()}
+	}
+	result := map[string]any{"ok": true}
+	for _, key := range []string{"entityId", "name", "state", "temperature", "confirmed"} {
+		if value, exists := payload[key]; exists {
+			result[key] = value
+		}
+	}
+	if call.Name == "control_home_entity" {
+		entityID, _ := call.Args["entity_id"].(string)
+		action, _ := call.Args["action"].(string)
+		result["confirmation"] = actionConfirmation(entityID, action, call.Args["temperature"])
+	}
+	return result
+}
+
+func actionConfirmation(entityID, action string, temperature any) string {
+	domain, _, _ := strings.Cut(entityID, ".")
+	device := "Устройство"
+	if domain == "light" {
+		device = "Свет"
+	} else if domain == "climate" {
+		device = "Кондиционер"
+	}
+	switch action {
+	case "turn_on":
+		return device + " включён."
+	case "turn_off":
+		return device + " выключен."
+	case "toggle":
+		return device + " переключён."
+	case "set_temperature":
+		if value, ok := temperature.(float64); ok {
+			return fmt.Sprintf("Установлено %.0f градусов.", value)
+		}
+		return "Температура установлена."
+	default:
+		return "Действие выполнено."
 	}
 }
 
@@ -331,14 +371,16 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string) str
 		verb = "напиши"
 	}
 	return strings.Join([]string{
-		"Ты голосовой ассистент умного дома.",
+		"Ты русскоязычный голосовой ассистент и управляешь умным домом.",
 		"Пользователь всегда говорит по-русски; распознавай вход только как русскую речь и всегда отвечай по-русски.",
 		"Никогда не превращай нерусскую или сомнительную расшифровку в команду умного дома: попроси повторить.",
 		"Строго различай противоположные команды: включи означает только turn_on, выключи или отключи означает только turn_off.",
 		"Любой ответ содержит не больше пяти слов.",
 		"Никаких приветствий, объяснений, планов, советов и лишних вопросов.",
 		"Никогда не сообщай о намерении перед вызовом функции: сразу вызывай функцию без текста.",
-		"После успешного действия " + verb + " только краткий итог.",
+		"После результата функции с ok=true и полем confirmation " + verb + " ровно значение confirmation без изменений и ничего больше.",
+		"Обычные вопросы, не относящиеся к управлению домом, не являются ошибкой: ответь на них напрямую без вызова функций.",
+		"Если для ответа нужны актуальные внешние данные, которых у тебя нет, кратко и честно скажи об этом; не проси повторять уже понятный вопрос.",
 		"Если команда неоднозначна, задай ровно один короткий вопрос с вариантами и жди ответа.",
 		"Для управления используй только control_home_entity и get_home_state.",
 		"Не утверждай, что действие выполнено, пока функция не вернула ok=true.",
@@ -361,7 +403,7 @@ func buildTools(entities []homeassistant.Entity) []liveapi.Tool {
 	return []liveapi.Tool{
 		{
 			Name:        "control_home_entity",
-			Description: "Управляет одной разрешённой сущностью Home Assistant.",
+			Description: "Управляет одной разрешённой сущностью Home Assistant. При команде управления вызови функцию первым элементом ответа без текста или аудио перед вызовом.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
