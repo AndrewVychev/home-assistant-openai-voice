@@ -373,7 +373,7 @@ func toolResultForModel(call liveapi.ToolCall, payload map[string]any, err error
 	}
 	result := map[string]any{"ok": true}
 	for _, key := range []string{
-		"entityId", "name", "state", "temperature", "temperatureUnit", "humidity",
+		"entityId", "name", "action", "state", "temperature", "temperatureUnit", "humidity",
 		"cloudCoverage", "windSpeed", "windSpeedUnit", "confirmed",
 	} {
 		if value, exists := payload[key]; exists {
@@ -381,72 +381,10 @@ func toolResultForModel(call liveapi.ToolCall, payload map[string]any, err error
 		}
 	}
 	if call.Name == "control_home_entity" {
-		entityID, _ := call.Args["entity_id"].(string)
 		action, _ := call.Args["action"].(string)
-		result["confirmation"] = actionConfirmation(entityID, action, call.Args["temperature"])
-	} else if call.Name == "get_home_state" {
-		entityID, _ := call.Args["entity_id"].(string)
-		domain, _, _ := strings.Cut(entityID, ".")
-		if domain == "weather" {
-			result["confirmation"] = weatherConfirmation(payload)
-		}
+		result["requestedAction"] = action
 	}
 	return result
-}
-
-func weatherConfirmation(payload map[string]any) string {
-	state, _ := payload["state"].(string)
-	condition := weatherCondition(state)
-	if temperature, ok := payload["temperature"].(float64); ok {
-		unit, _ := payload["temperatureUnit"].(string)
-		if unit == "" {
-			unit = "°C"
-		}
-		return fmt.Sprintf("Сейчас %s, %.1f %s, босс.", condition, temperature, unit)
-	}
-	return "Сейчас " + condition + ", босс."
-}
-
-func weatherCondition(condition string) string {
-	translations := map[string]string{
-		"clear-night": "ясно", "sunny": "ясно", "partlycloudy": "переменная облачность",
-		"cloudy": "облачно", "fog": "туман", "hail": "град", "lightning": "гроза",
-		"lightning-rainy": "гроза с дождём", "pouring": "ливень", "rainy": "дождь",
-		"snowy": "снег", "snowy-rainy": "снег с дождём", "windy": "ветрено",
-		"windy-variant": "ветрено и облачно", "exceptional": "необычная погода",
-	}
-	if translated := translations[condition]; translated != "" {
-		return translated
-	}
-	if condition == "" {
-		return "погода неизвестна"
-	}
-	return condition
-}
-
-func actionConfirmation(entityID, action string, temperature any) string {
-	domain, _, _ := strings.Cut(entityID, ".")
-	device := "Устройство"
-	if domain == "light" {
-		device = "Свет"
-	} else if domain == "climate" {
-		device = "Кондиционер"
-	}
-	switch action {
-	case "turn_on":
-		return device + " включён, босс."
-	case "turn_off":
-		return device + " выключен, босс."
-	case "toggle":
-		return device + " переключён, босс."
-	case "set_temperature":
-		if value, ok := temperature.(float64); ok {
-			return fmt.Sprintf("Установлено %.0f градусов, босс.", value)
-		}
-		return "Температура установлена, босс."
-	default:
-		return "Действие выполнено, босс."
-	}
 }
 
 func transcriptionVocabulary(entities []homeassistant.Entity) []string {
@@ -493,10 +431,12 @@ func buildInstructions(entities []homeassistant.Entity, responseMode string, rec
 		"Никогда не превращай нерусскую или сомнительную расшифровку в команду умного дома: попроси повторить.",
 		"Строго различай противоположные команды: включи означает только turn_on, выключи или отключи означает только turn_off.",
 		"Любой ответ содержит не больше пяти слов.",
-		"Говори в пародийном gachi-стиле: брутально, энергично и с лёгкими мемными обращениями вроде «босс», но без сексуальных подробностей; это правило не изменяет значение confirmation.",
+		"Говори в жёстком пародийном gachi-стиле: максимально брутально, напористо и мемно; каждый ответ обязательно содержит обращение «мастер», никогда не говори «босс».",
+		"В каждом ответе используй выраженный gachi-маркер в духе «Глубже, мастер», «Мужская мощь», «Подземелье подчинено», «Да, мастер, ещё глубже», но не добавляй сексуальных подробностей.",
 		"Никаких приветствий, объяснений, планов, советов и лишних вопросов.",
 		"Никогда не сообщай о намерении перед вызовом функции: сразу вызывай функцию без текста.",
-		"После результата любой функции с ok=true и полем confirmation " + verb + " ровно значение confirmation без изменений и ничего больше.",
+		"После результата функции с ok=true " + verb + " краткий gachi-ответ по точным полям action, state и temperature; не выдумывай другие числа или действия.",
+		"Технические английские значения state переводи на естественный русский, сохраняя точные числа и единицы измерения.",
 		"Обычные вопросы, не относящиеся к управлению домом, не являются ошибкой: ответь на них напрямую без вызова функций.",
 		"Если для ответа нужны актуальные внешние данные, которых у тебя нет, кратко и честно скажи об этом; не проси повторять уже понятный вопрос.",
 		"На вопрос о текущей погоде обязательно вызови get_home_state для weather-сущности; если weather-сущность одна, используй её и для вопроса с названием города.",
