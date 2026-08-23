@@ -32,6 +32,9 @@ class SatelliteService : Service() {
     private var audio: AudioEngine? = null
     private var toolExecuted = false
     private val assistantText = StringBuilder()
+    private var serverWakeMode = false
+    private var wakeReadyPending = false
+    private var turnCompleting = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -45,19 +48,24 @@ class SatelliteService : Service() {
                     token = intent.getStringExtra(EXTRA_TOKEN).orEmpty(),
                     provider = intent.getStringExtra(EXTRA_PROVIDER).orEmpty(),
                     satelliteId = intent.getStringExtra(EXTRA_SATELLITE_ID).orEmpty(),
+                    activationMode = intent.getStringExtra(EXTRA_ACTIVATION_MODE).orEmpty(),
                 )
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun connect(gateway: String, token: String, provider: String, satelliteId: String) {
+    private fun connect(gateway: String, token: String, provider: String, satelliteId: String, activationMode: String) {
         stopping.set(false)
         toolExecuted = false
         assistantText.clear()
+        serverWakeMode = activationMode != "manual"
+        wakeReadyPending = false
+        turnCompleting = false
         audio = AudioEngine(this) { frame -> socket?.send(frame.toByteString()) == true }
-        val separator = if (gateway.contains('?')) "&" else "?"
-        val url = gateway + separator + listOf(
+        val endpoint = if (serverWakeMode) gateway.substringBefore('?').removeSuffix("/live") + "/satellite" else gateway
+        val separator = if (endpoint.contains('?')) "&" else "?"
+        val url = endpoint + separator + listOf(
             "protocol=1",
             "transport=binary",
             "response_mode=audio",
@@ -72,7 +80,7 @@ class SatelliteService : Service() {
 
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            publish("Gateway подключён, жду Live API…", true)
+            publish(if (serverWakeMode) "Gateway подключён, загружаю «Кузу»…" else "Gateway подключён, жду Live API…", true)
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -83,7 +91,26 @@ class SatelliteService : Service() {
             when (message.optString("type")) {
                 "ready" -> {
                     publish("Слушаю · ${message.optString("provider")} · ${message.optString("model")}", true)
-                    audio?.startCapture()
+                    startCapture()
+                }
+                "wake_ready" -> {
+                    wakeReadyPending = true
+                    if (!turnCompleting) resumeWakeListening()
+                }
+                "wake_detected" -> {
+                    wakeReadyPending = false
+                    publish("Куза услышана · score ${"%.3f".format(message.optDouble("score"))}", true)
+                }
+                "wake_status" -> {
+                    if (!turnCompleting) {
+                        publish(
+                            "Жду «Кузу» · score ${"%.3f".format(message.optDouble("maxScore"))}/${"%.2f".format(message.optDouble("threshold"))} · mic ${"%.1f".format(message.optDouble("peakDBFS"))} dBFS",
+                            true,
+                        )
+                    }
+                }
+                "live_ready" -> {
+                    publish("Слушаю команду · ${message.optString("provider")} · ${message.optString("model")}", true)
                 }
                 "input_transcript" -> publish("Ты: ${message.optString("text")}", true)
                 "output_transcript", "text_delta" -> {
@@ -120,17 +147,41 @@ class SatelliteService : Service() {
 
     private fun completeTurn() {
         val clarification = !toolExecuted && requestsClarification(assistantText.toString())
+        turnCompleting = serverWakeMode && !clarification
         val delay = audio?.remainingPlaybackMillis() ?: 150L
         scheduler.schedule({
             if (clarification && !stopping.get()) {
                 assistantText.clear()
                 audio?.resetPlayback()
-                audio?.startCapture()
+                startCapture()
                 publish("Слушаю уточнение…", true)
+            } else if (serverWakeMode && !stopping.get()) {
+                assistantText.clear()
+                toolExecuted = false
+                audio?.resetPlayback()
+                turnCompleting = false
+                if (wakeReadyPending) {
+                    resumeWakeListening()
+                } else {
+                    publish("Возвращаюсь к ожиданию «Кузы»…", true)
+                }
             } else {
                 finish("Сессия завершена")
             }
         }, delay, TimeUnit.MILLISECONDS)
+    }
+
+    private fun resumeWakeListening() {
+        wakeReadyPending = false
+        assistantText.clear()
+        toolExecuted = false
+        audio?.resetPlayback()
+        startCapture()
+        publish("Жду: «Куза»…", true)
+    }
+
+    private fun startCapture() {
+        runCatching { audio?.startCapture() }.onFailure { fail("Микрофон: ${it.message}") }
     }
 
     private fun requestsClarification(text: String): Boolean {
@@ -214,6 +265,7 @@ class SatelliteService : Service() {
         const val EXTRA_TOKEN = "token"
         const val EXTRA_PROVIDER = "provider"
         const val EXTRA_SATELLITE_ID = "satellite_id"
+        const val EXTRA_ACTIVATION_MODE = "activation_mode"
         const val EXTRA_STATUS = "status"
         const val EXTRA_RUNNING = "running"
         private const val CHANNEL_ID = "homevoice-satellite"

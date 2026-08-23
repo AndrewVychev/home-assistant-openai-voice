@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -18,6 +20,7 @@ import (
 	"homevoice/internal/config"
 	"homevoice/internal/homeassistant"
 	liveapi "homevoice/internal/live"
+	"homevoice/internal/wakeword"
 )
 
 type Server struct {
@@ -30,6 +33,11 @@ type Server struct {
 }
 
 const recentTargetTTL = 10 * time.Minute
+
+const (
+	serverWakePreRollBytes = 16000 * 2
+	serverWakeAudioQueue   = 300
+)
 
 type recentTarget struct {
 	EntityID  string
@@ -71,6 +79,7 @@ func (server *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
 	mux.HandleFunc("GET /live", server.live)
+	mux.HandleFunc("GET /satellite", server.satellite)
 	return withRecovery(server.logger, mux)
 }
 
@@ -215,6 +224,343 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 			server.relayMessage(ctx, writer, conversation, deliver, responseMode, satelliteID, binaryAudio)
 		}
 	}
+}
+
+// satellite keeps a cheap local-network PCM stream open and creates a paid
+// Live session only after the server-side wake-word detector fires.
+func (server *Server) satellite(response http.ResponseWriter, request *http.Request) {
+	if !authorizedSatellite(request, server.config.SatelliteToken) {
+		response.Header().Set("WWW-Authenticate", "Bearer")
+		writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "Неверный токен сателлита."})
+		return
+	}
+	if protocol := request.URL.Query().Get("protocol"); protocol != "" && protocol != "1" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "Неподдерживаемая версия satellite protocol."})
+		return
+	}
+	if transport := request.URL.Query().Get("transport"); transport != "binary" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "Server wake требует transport=binary."})
+		return
+	}
+
+	providerID := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("provider")))
+	if providerID == "" {
+		providerID = server.config.DefaultProvider
+	}
+	provider, ok := server.providers[providerID]
+	if !ok {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "Неизвестный voice provider: " + providerID})
+		return
+	}
+	if !provider.Configured() {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "Добавьте " + providerKeyName(providerID) + " в .env"})
+		return
+	}
+	satelliteID := strings.TrimSpace(request.URL.Query().Get("satellite_id"))
+	if satelliteID == "" {
+		satelliteID = "anonymous"
+	}
+	if len(satelliteID) > 64 {
+		satelliteID = satelliteID[:64]
+	}
+
+	connection, err := websocket.Accept(response, request, &websocket.AcceptOptions{
+		OriginPatterns: []string{"localhost:*", "127.0.0.1:*"},
+	})
+	if err != nil {
+		server.logger.Printf("persistent satellite websocket: %v", err)
+		return
+	}
+	connection.SetReadLimit(2 << 20)
+	writer := &socketWriter{connection: connection}
+	defer connection.Close(websocket.StatusNormalClosure, "satellite stopped")
+
+	detector, err := wakeword.NewMicro(wakeword.MicroConfig{
+		AssetsDir: server.config.WakeAssets,
+		Threshold: server.config.WakeThreshold,
+	})
+	if err != nil {
+		writer.send(request.Context(), map[string]any{"type": "error", "message": "Server wake: " + err.Error()})
+		return
+	}
+	defer detector.Close()
+
+	ctx, cancel := context.WithCancel(request.Context())
+	defer cancel()
+	audioFrames := make(chan []byte, serverWakeAudioQueue)
+	readerErrors := make(chan error, 1)
+	go server.readPersistentSatellite(ctx, connection, audioFrames, readerErrors)
+
+	for {
+		writer.send(ctx, map[string]any{
+			"type": "wake_ready", "protocolVersion": 1, "transport": "binary", "phrase": detector.Phrase(),
+			"inputAudio": map[string]any{"encoding": "pcm_s16le", "sampleRate": 16000, "channels": 1},
+		})
+		preRoll, score, err := waitForServerWake(ctx, detector, audioFrames, readerErrors, func(maxScore float32, peakDBFS float64) {
+			writer.send(ctx, map[string]any{
+				"type": "wake_status", "maxScore": maxScore, "peakDBFS": peakDBFS,
+				"threshold": effectiveWakeThreshold(server.config.WakeThreshold),
+			})
+		})
+		if err != nil {
+			if !isNormalClose(err) && !errors.Is(err, context.Canceled) {
+				server.logger.Printf("server wake %s: %v", satelliteID, err)
+			}
+			return
+		}
+		server.logger.Printf("server wake %s: detected score %.3f", satelliteID, score)
+		writer.send(ctx, map[string]any{"type": "wake_detected", "phrase": detector.Phrase(), "score": score})
+		if err := server.runSatelliteLive(ctx, writer, provider, satelliteID, preRoll, audioFrames, readerErrors); err != nil {
+			if isNormalClose(err) || errors.Is(err, context.Canceled) {
+				return
+			}
+			writer.send(ctx, map[string]any{"type": "error", "message": err.Error()})
+		}
+		if !drainAudioFrames(audioFrames) {
+			return
+		}
+		if err := detector.Reset(); err != nil {
+			writer.send(ctx, map[string]any{"type": "error", "message": "Server wake reset: " + err.Error()})
+			return
+		}
+	}
+}
+
+func (server *Server) readPersistentSatellite(ctx context.Context, connection *websocket.Conn, audioFrames chan<- []byte, readerErrors chan<- error) {
+	defer close(audioFrames)
+	for {
+		messageType, payload, err := connection.Read(ctx)
+		if err != nil {
+			readerErrors <- err
+			return
+		}
+		if messageType != websocket.MessageBinary {
+			continue
+		}
+		if len(payload) == 0 || len(payload)%2 != 0 {
+			continue
+		}
+		frame := append([]byte(nil), payload...)
+		select {
+		case audioFrames <- frame:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func waitForServerWake(
+	ctx context.Context,
+	detector wakeword.StreamDetector,
+	audioFrames <-chan []byte,
+	readerErrors <-chan error,
+	report func(maxScore float32, peakDBFS float64),
+) ([]byte, float32, error) {
+	preRoll := make([]byte, 0, serverWakePreRollBytes)
+	metricsStarted := time.Now()
+	var maximumScore float32
+	peakDBFS := -96.0
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		case err := <-readerErrors:
+			return nil, 0, err
+		case frame, ok := <-audioFrames:
+			if !ok {
+				return nil, 0, errors.New("satellite audio stream closed")
+			}
+			preRoll = appendServerPreRoll(preRoll, frame, serverWakePreRollBytes)
+			detected, score, err := detector.ProcessPCM16(frame)
+			if err != nil {
+				return nil, 0, err
+			}
+			if detected {
+				return preRoll, score, nil
+			}
+			maximumScore = max(maximumScore, score)
+			peakDBFS = max(peakDBFS, pcmPeakDBFS(frame))
+			if report != nil && time.Since(metricsStarted) >= time.Second {
+				report(maximumScore, peakDBFS)
+				metricsStarted = time.Now()
+				maximumScore = 0
+				peakDBFS = -96
+			}
+		}
+	}
+}
+
+func effectiveWakeThreshold(configured float32) float32 {
+	if configured > 0 {
+		return configured
+	}
+	return 0.85
+}
+
+func pcmPeakDBFS(data []byte) float64 {
+	var peak int32
+	for offset := 0; offset+1 < len(data); offset += 2 {
+		value := int32(int16(binary.LittleEndian.Uint16(data[offset:])))
+		if value < 0 {
+			value = -value
+		}
+		peak = max(peak, value)
+	}
+	if peak == 0 {
+		return -96
+	}
+	return 20 * math.Log10(float64(peak)/32768)
+}
+
+func (server *Server) runSatelliteLive(
+	ctx context.Context,
+	writer *socketWriter,
+	provider liveapi.Provider,
+	satelliteID string,
+	preRoll []byte,
+	audioFrames <-chan []byte,
+	readerErrors <-chan error,
+) error {
+	entities, err := server.home.ControllableEntities(ctx)
+	if err != nil {
+		return err
+	}
+	recent := server.getRecentTarget(satelliteID, time.Now())
+	session, err := provider.Connect(ctx, liveapi.SessionConfig{
+		Instructions: buildInstructions(entities, "audio", recent),
+		ResponseMode: "audio",
+		Tools:        buildTools(entities),
+		Vocabulary:   transcriptionVocabulary(entities),
+	})
+	if err != nil {
+		return err
+	}
+	conversation := &liveSession{session: session}
+	defer conversation.close()
+	writer.send(ctx, map[string]any{
+		"type": "live_ready", "provider": provider.ID(), "model": provider.Model(), "responseMode": "audio",
+		"outputAudio": map[string]any{"encoding": "pcm_s16le", "sampleRate": 24000, "channels": 1},
+	})
+	if len(preRoll) > 0 {
+		if err := conversation.sendAudio(preRoll); err != nil {
+			return err
+		}
+	}
+
+	sendCtx, stopSending := context.WithCancel(ctx)
+	defer stopSending()
+	senderErrors := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-sendCtx.Done():
+				senderErrors <- nil
+				return
+			case frame, ok := <-audioFrames:
+				if !ok {
+					senderErrors <- errors.New("satellite audio stream closed")
+					return
+				}
+				if err := conversation.sendAudio(frame); err != nil {
+					senderErrors <- err
+					return
+				}
+			}
+		}
+	}()
+
+	providerEvents := make(chan liveapi.Event, 1)
+	providerErrors := make(chan error, 1)
+	go func() {
+		for {
+			event, err := conversation.receive()
+			if err != nil {
+				providerErrors <- err
+				return
+			}
+			select {
+			case providerEvents <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	buffer := &responseBuffer{}
+	toolExecuted := false
+	var assistantText strings.Builder
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-readerErrors:
+			return err
+		case err := <-senderErrors:
+			if err != nil {
+				return err
+			}
+		case err := <-providerErrors:
+			return err
+		case event := <-providerEvents:
+			for _, deliver := range buffer.accept(event) {
+				switch deliver.Kind {
+				case liveapi.EventToolCall:
+					toolExecuted = true
+				case liveapi.EventOutputTranscript, liveapi.EventTextDelta:
+					assistantText.WriteString(deliver.Text)
+				}
+				server.relayMessage(ctx, writer, conversation, deliver, "audio", satelliteID, true)
+				if deliver.Kind == liveapi.EventTurnComplete {
+					if toolExecuted || !asksForClarification(assistantText.String()) {
+						return nil
+					}
+					toolExecuted = false
+					assistantText.Reset()
+				}
+			}
+		}
+	}
+}
+
+func appendServerPreRoll(buffer, frame []byte, limit int) []byte {
+	if len(frame) >= limit {
+		return append(buffer[:0], frame[len(frame)-limit:]...)
+	}
+	overflow := len(buffer) + len(frame) - limit
+	if overflow > 0 {
+		copy(buffer, buffer[overflow:])
+		buffer = buffer[:len(buffer)-overflow]
+	}
+	return append(buffer, frame...)
+}
+
+func drainAudioFrames(audioFrames <-chan []byte) bool {
+	for {
+		select {
+		case _, ok := <-audioFrames:
+			if !ok {
+				return false
+			}
+		default:
+			return true
+		}
+	}
+}
+
+func asksForClarification(response string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(response))
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, "?") {
+		return true
+	}
+	for _, marker := range []string{"уточни", "какой ", "какая ", "какое ", "какие ", "в какой ", "что именно"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (server *Server) readSatellite(ctx context.Context, connection *websocket.Conn, conversation *liveSession, binaryAudio bool) error {

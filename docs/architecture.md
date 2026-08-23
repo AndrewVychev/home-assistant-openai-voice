@@ -3,16 +3,17 @@
 ```text
 Android сейчас                    ReSpeaker ESP32-S3 потом
 ┌──────────────────┐              ┌──────────────────────┐
-│ manual activation│              │ local wake word      │
-│ AudioRecord 16k  │              │ I²S mic + DSP 16k    │
+│ AudioRecord 16k  │              │ I²S mic 16k          │
 │ AudioTrack 24k   │              │ I²S speaker 24k      │
+│ reconnect/status │              │ reconnect/status     │
 └────────┬─────────┘              └──────────┬───────────┘
          └──────── Satellite Protocol v1 ────┘
                               │ binary PCM + JSON
                               ▼
                      ┌──────────────────┐
                      │ Go gateway / N100│
-                     │ auth + policy    │
+                     │ server wake word │
+                     │ pre-roll + auth  │
                      │ context + HA     │
                      └───────┬──────────┘
                              ├── OpenAI Realtime
@@ -24,8 +25,7 @@ Android сейчас                    ReSpeaker ESP32-S3 потом
 
 Satellite отвечает только за:
 
-- локальную активацию (`Manual`, `Kuza`, `WakeNet` — реализации одного контракта);
-- захват PCM16 mono 16 kHz и короткий pre-roll;
+- захват PCM16 mono 16 kHz;
 - отправку бинарных audio frames;
 - воспроизведение PCM16 mono 24 kHz;
 - индикацию состояний: idle, connecting, listening, thinking, speaking, error.
@@ -33,6 +33,7 @@ Satellite отвечает только за:
 Gateway отвечает за всё изменяемое и секретное:
 
 - ключи OpenAI/Gemini и токен Home Assistant;
+- локальный wake word «Куза» и секундный pre-roll для каждого потока;
 - список сущностей и комнат;
 - tool calling, guard rules и подтверждение фактического состояния;
 - краткосрочный контекст по `satellite_id`;
@@ -44,15 +45,15 @@ Gateway отвечает за всё изменяемое и секретное:
 
 ### 1. Android-прототип
 
-Приложение `android-satellite` работает по кнопке и запускает foreground service только на одну сессию. Это позволяет проверить микрофон телефона, Wi-Fi, задержку, распознавание и качество динамика без постоянной платы за Live API.
+Приложение `android-satellite` имеет основной режим `Серверная «Куза»` и диагностический push-to-talk. В основном режиме foreground service постоянно передаёт PCM по LAN, но платная Live-сессия существует только между `wake_detected` и `turn_complete`.
 
-### 2. Локальная активация на Android
+### 2. Серверная активация
 
-Добавляется `ActivationEngine` с кольцевым PCM-буфером. Первая реализация — модель «Куза» через TensorFlow Lite после отдельной проверки лицензии и качества на ARM. После wake отправляются последние 0.5–1.0 секунды pre-roll и текущая команда. Live API до wake не подключается.
+Gateway запускает отдельное состояние wake detector для каждого `satellite_id`, хранит секундный PCM pre-roll и после «Кузы» временно переключает тот же поток в OpenAI/Gemini. Клиент не содержит TensorFlow Lite и остаётся аппаратно независимым.
 
 ### 3. ReSpeaker ESP32-S3
 
-Прошивка повторяет тот же state machine и Protocol v1. Аппаратный слой заменяется на I²S mic/speaker; activation engine — Espressif WakeNet либо совместимая локальная TFLite/ESP-DL модель. Для первой версии остаётся half-duplex: во время ответа микрофон заглушён. Это заметно упрощает echo cancellation.
+Прошивка реализует тот же Protocol v1. Android `AudioRecord/AudioTrack` заменяется на I²S mic/speaker; wake word остаётся на gateway. Для первой версии сохраняется half-duplex: во время ответа микрофон заглушён. Это заметно упрощает echo cancellation.
 
 ### 4. Постоянная домашняя система
 
@@ -66,7 +67,7 @@ Gateway отвечает за всё изменяемое и секретное:
 ## Важные решения
 
 - Бинарный PCM вместо base64 экономит примерно треть сетевого трафика и RAM на ESP32.
-- Сессия с облаком создаётся только после активации.
+- Сессия с облаком создаётся только после серверного wake word.
 - Контекст изолирован стабильным `satellite_id`, например `kitchen` или `bedroom`.
 - Никаких прямых запросов Android/ESP32 к Home Assistant.
 - Текущий cleartext `ws://` разрешён только для прототипа в доверенной Wi-Fi сети; финальная установка использует `wss://` и отдельные device tokens.

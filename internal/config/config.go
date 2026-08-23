@@ -21,6 +21,8 @@ type Config struct {
 	OpenAIVoice              string
 	OpenAITranscriptionModel string
 	SatelliteToken           string
+	WakeAssets               string
+	WakeThreshold            float32
 }
 
 func Load() (Config, error) {
@@ -28,6 +30,10 @@ func Load() (Config, error) {
 	port, err := strconv.Atoi(valueOrDefault("PORT", "3000"))
 	if err != nil || port < 1 || port > 65535 {
 		return Config{}, errors.New("PORT должен быть числом от 1 до 65535")
+	}
+	wakeThreshold, err := strconv.ParseFloat(valueOrDefault("HOMEVOICE_WAKE_THRESHOLD", "0.65"), 32)
+	if err != nil || wakeThreshold < 0 || wakeThreshold > 1 {
+		return Config{}, errors.New("HOMEVOICE_WAKE_THRESHOLD должен быть числом от 0 до 1")
 	}
 	config := Config{
 		Host:                     valueOrDefault("HOST", "127.0.0.1"),
@@ -42,6 +48,8 @@ func Load() (Config, error) {
 		OpenAIVoice:              valueOrDefault("OPENAI_VOICE", "marin"),
 		OpenAITranscriptionModel: valueOrDefault("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
 		SatelliteToken:           strings.TrimSpace(os.Getenv("SATELLITE_TOKEN")),
+		WakeAssets:               valueOrDefault("HOMEVOICE_MICRO_WAKE_ASSETS", "wakeword-micro"),
+		WakeThreshold:            float32(wakeThreshold),
 	}
 	if config.DefaultProvider != "gemini" && config.DefaultProvider != "openai" {
 		return Config{}, errors.New("VOICE_PROVIDER должен быть gemini или openai")

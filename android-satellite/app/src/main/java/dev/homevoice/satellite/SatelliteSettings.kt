@@ -7,6 +7,7 @@ data class SatelliteSettings(
     val token: String,
     val provider: String,
     val satelliteId: String,
+    val activationMode: String,
 ) {
     fun save(context: Context) {
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit()
@@ -14,6 +15,7 @@ data class SatelliteSettings(
             .putString("token", token)
             .putString("provider", provider)
             .putString("satellite_id", satelliteId)
+            .putString("activation_mode", activationMode)
             .apply()
     }
 
@@ -27,6 +29,7 @@ data class SatelliteSettings(
                 token = preferences.getString("token", "").orEmpty(),
                 provider = preferences.getString("provider", "openai").orEmpty(),
                 satelliteId = preferences.getString("satellite_id", "android-room").orEmpty(),
+                activationMode = preferences.getString("activation_mode", "wake").orEmpty(),
             )
         }
     }

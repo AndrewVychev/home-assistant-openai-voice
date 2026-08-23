@@ -48,24 +48,24 @@ make wake
 
 ## Android-сателлит
 
-Первая версия работает как push-to-talk и открывает Live API только на одну команду. Это позволяет проверить телефон как комнатный микрофон без оплаты облачной сессии в простое.
+Android работает как тестовый комнатный сателлит. Основной режим `Серверная «Куза»` постоянно передаёт PCM только на локальный gateway; OpenAI/Gemini подключается исключительно после wake word. Диагностический push-to-talk сохранён вторым режимом.
 
 1. Открой каталог `android-satellite` в Android Studio или собери `./gradlew assembleDebug`.
 2. Установи `app-debug.apk` на телефон и разреши микрофон/уведомления.
 3. Укажи `ws://IP-МАКА:3000/live`, provider и стабильный `satellite_id`, например `kitchen-phone`.
 4. Если на gateway задан `SATELLITE_TOKEN`, вставь тот же токен.
-5. Нажми «Говорить», дождись «Слушаю» и произнеси команду.
+5. Выбери `Серверная «Куза»`, нажми `Запустить` и дождись `Жду: «Куза»…`.
+6. Говори слитно: `Куза, включи свет на кухне`. После ответа сателлит сам возвращается к wake word.
 
 Android использует foreground service, `AudioRecord` PCM16/16 kHz, бинарный WebSocket transport и `AudioTrack` PCM16/24 kHz. Cleartext `ws://` включён только для LAN-прототипа; финальная система должна использовать `wss://`.
 
 ## Схема
 
 ```text
-Android / Go / ESP32-S3 satellite
-      │ local wake or button
-      │ PCM16 over WebSocket
+Android / ESP32-S3 satellite
+      │ continuous PCM16 over local WebSocket
       ▼
-Go gateway ──► Gemini Live / OpenAI Realtime
+Go gateway ──► server-side «Куза» ──► Gemini Live / OpenAI Realtime
       │
       └──────► Home Assistant REST/WebSocket
 ```
@@ -83,9 +83,11 @@ Go gateway:
 
 ## Wake word
 
-Go-сателлит использует community-модель `Kuza.tflite`. Она локально обрабатывает PCM 16 kHz, после фразы «Ку́за» запускает выбранный Live provider и передаёт pre-roll, чтобы начало команды не потерялось. Модель скачивается из [splastunov/microwakeword-ru-model-train](https://github.com/splastunov/microwakeword-ru-model-train) и не коммитится; у исходного репозитория не указана лицензия, поэтому распространение готового образа требует отдельной проверки.
+Gateway и Go-сателлит используют community-модель `Kuza.tflite`. В серверном режиме gateway локально обрабатывает входной PCM 16 kHz, держит секундный кольцевой pre-roll и подключает Live provider только после фразы «Ку́за». Поэтому команда `Куза, включи свет` не обрезается, а облако не расходуется в простое. Модель скачивается из [splastunov/microwakeword-ru-model-train](https://github.com/splastunov/microwakeword-ru-model-train) и не коммитится; у исходного репозитория не указана лицензия, поэтому распространение готового образа требует отдельной проверки.
 
-Следующий Android-этап — подключить эту модель через сменный `ActivationEngine`. ESP32-S3 реализует тот же контракт через WakeNet либо совместимую локальную модель. Облачный API до wake не подключается.
+Для телефонного микрофона серверный порог по умолчанию равен `0.65`. Android раз в секунду показывает максимальный `score`, текущий threshold и пик микрофона в dBFS. Если «Куза» часто пропускается, снижай `HOMEVOICE_WAKE_THRESHOLD` шагом `0.05`; если появляются ложные срабатывания — повышай. После изменения перезапусти gateway.
+
+Android и будущий ESP32-S3 не содержат wake-модель: они только передают PCM и воспроизводят ответ. Замена телефона на ReSpeaker не меняет gateway, Home Assistant или Live provider.
 
 ## Проверка
 

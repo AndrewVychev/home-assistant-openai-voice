@@ -29,6 +29,7 @@ class MainActivity : Activity() {
     private lateinit var token: EditText
     private lateinit var satelliteId: EditText
     private lateinit var provider: Spinner
+    private lateinit var activationMode: Spinner
     private lateinit var status: TextView
     private lateinit var talk: Button
     private var running = false
@@ -37,7 +38,7 @@ class MainActivity : Activity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             running = intent?.getBooleanExtra(SatelliteService.EXTRA_RUNNING, false) == true
             status.text = intent?.getStringExtra(SatelliteService.EXTRA_STATUS) ?: "Остановлено"
-            talk.text = if (running) "Остановить" else "Говорить"
+            talk.text = if (running) "Остановить" else "Запустить"
         }
     }
 
@@ -85,6 +86,11 @@ class MainActivity : Activity() {
                 adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, listOf("openai", "gemini"))
             }
             addView(provider)
+            addView(label("Активация"))
+            activationMode = Spinner(context).apply {
+                adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, listOf("Серверная «Куза»", "Нажать и говорить"))
+            }
+            addView(activationMode)
             status = TextView(context).apply {
                 text = "Готов к подключению"
                 textSize = 18f
@@ -93,13 +99,13 @@ class MainActivity : Activity() {
             }
             addView(status)
             talk = Button(context).apply {
-                text = "Говорить"
+                text = "Запустить"
                 textSize = 20f
                 setOnClickListener { toggleSatellite() }
             }
             addView(talk, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             addView(TextView(context).apply {
-                text = "Нажми «Говорить», дождись статуса «Слушаю» и скажи одну команду. После ответа сессия закроется автоматически."
+                text = "В режиме «Серверная Куза» телефон постоянно передаёт звук только на локальный gateway. OpenAI/Gemini запускается после слова «Куза»."
                 setPadding(0, padding, 0, 0)
             })
         }
@@ -121,6 +127,7 @@ class MainActivity : Activity() {
         token.setText(settings.token)
         satelliteId.setText(settings.satelliteId)
         provider.setSelection(if (settings.provider == "gemini") 1 else 0)
+        activationMode.setSelection(if (settings.activationMode == "manual") 1 else 0)
     }
 
     private fun toggleSatellite() {
@@ -138,6 +145,7 @@ class MainActivity : Activity() {
             token = token.text.toString().trim(),
             provider = provider.selectedItem.toString(),
             satelliteId = satelliteId.text.toString().trim().ifEmpty { "android-room" },
+            activationMode = if (activationMode.selectedItemPosition == 1) "manual" else "wake",
         )
         if (!settings.gateway.startsWith("ws://") && !settings.gateway.startsWith("wss://")) {
             Toast.makeText(this, "Gateway должен начинаться с ws:// или wss://", Toast.LENGTH_LONG).show()
@@ -150,6 +158,7 @@ class MainActivity : Activity() {
             .putExtra(SatelliteService.EXTRA_TOKEN, settings.token)
             .putExtra(SatelliteService.EXTRA_PROVIDER, settings.provider)
             .putExtra(SatelliteService.EXTRA_SATELLITE_ID, settings.satelliteId)
+            .putExtra(SatelliteService.EXTRA_ACTIVATION_MODE, settings.activationMode)
         startForegroundService(intent)
         running = true
         talk.text = "Остановить"

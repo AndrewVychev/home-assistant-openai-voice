@@ -49,6 +49,27 @@ func TestSatelliteAuthorization(t *testing.T) {
 	}
 }
 
+func TestServerWakePreRollKeepsNewestAudio(t *testing.T) {
+	buffer := appendServerPreRoll(nil, []byte{1, 2, 3, 4}, 6)
+	buffer = appendServerPreRoll(buffer, []byte{5, 6, 7, 8}, 6)
+	if !slices.Equal(buffer, []byte{3, 4, 5, 6, 7, 8}) {
+		t.Fatalf("unexpected pre-roll: %v", buffer)
+	}
+	buffer = appendServerPreRoll(buffer, []byte{9, 10, 11, 12, 13, 14, 15, 16}, 6)
+	if !slices.Equal(buffer, []byte{11, 12, 13, 14, 15, 16}) {
+		t.Fatalf("oversized frame did not replace pre-roll: %v", buffer)
+	}
+}
+
+func TestGatewayClarificationDetection(t *testing.T) {
+	if !asksForClarification("Кухня или спальня?") {
+		t.Fatal("question was not recognized as clarification")
+	}
+	if asksForClarification("Свет включён") {
+		t.Fatal("completed action was recognized as clarification")
+	}
+}
+
 func TestTranscriptionVocabularyContainsRussianCommandsAndEntities(t *testing.T) {
 	entities := []homeassistant.Entity{{EntityID: "climate.living_room", Name: "Кондиционер", Area: "Гостиная"}}
 	vocabulary := transcriptionVocabulary(entities)

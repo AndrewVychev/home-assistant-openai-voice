@@ -4,8 +4,10 @@
 
 ## Соединение
 
+Для ручной активации используется `/live`; постоянный server-side wake использует `/satellite`:
+
 ```text
-GET ws(s)://gateway:3000/live
+GET ws(s)://gateway:3000/satellite
     ?protocol=1
     &transport=binary
     &provider=openai|gemini
@@ -23,7 +25,7 @@ Authorization: Bearer <SATELLITE_TOKEN>
 - Рекомендуемый входной frame: 20 ms = 640 bytes.
 - Микрофон выключается на время воспроизведения ответа, поэтому протокол сейчас half-duplex и не требует полноценного AEC.
 
-После подключения gateway присылает текстовый JSON:
+В ручном `/live` после подключения gateway присылает текстовый JSON:
 
 ```json
 {
@@ -38,18 +40,18 @@ Authorization: Bearer <SATELLITE_TOKEN>
 }
 ```
 
-До `ready` аудио не отправляется. Управляющие и диагностические события остаются JSON text frames: `input_transcript`, `output_transcript`, `tool_call`, `ha_result`, `turn_complete`, `error`. Клиент может отправить `audio_stream_end` или `text`.
+В постоянном `/satellite` gateway сначала присылает `wake_ready`; после него сателлит непрерывно отправляет PCM. При распознавании приходят `wake_detected` и затем `live_ready`. Управляющие и диагностические события остаются JSON text frames: `input_transcript`, `output_transcript`, `tool_call`, `ha_result`, `turn_complete`, `error`.
 
 Старый `json-base64` транспорт временно поддерживается Go CLI для обратной совместимости.
 
 ## Жизненный цикл
 
-1. Сателлит постоянно слушает только локальный activation engine или ждёт нажатия кнопки.
-2. После активации он открывает `/live` и хранит короткий PCM pre-roll, чтобы не потерять начало команды.
-3. После `ready` отправляет pre-roll и живой PCM.
-4. Gateway подключает выбранный Live provider, исполняет разрешённый tool call и возвращает ответ.
+1. Сателлит открывает `/satellite`, получает `wake_ready` и непрерывно отправляет PCM по локальной сети.
+2. Gateway распознаёт «Кузу» локально и держит последние 1.0 секунды PCM в кольцевом pre-roll.
+3. После wake gateway присылает `wake_detected`, подключает Live provider и передаёт pre-roll вместе с живой командой.
+4. Gateway исполняет разрешённый tool call и возвращает ответ.
 5. На первом ответном аудио сателлит глушит микрофон и воспроизводит PCM.
-6. После `turn_complete` закрывает облачную сессию либо продолжает её, если модель задала уточняющий вопрос.
+6. После `turn_complete` gateway закрывает только облачную сессию и возвращает постоянное соединение в `wake_ready`. При уточняющем вопросе Live-сессия остаётся открытой.
 
 ## Совместимость
 
