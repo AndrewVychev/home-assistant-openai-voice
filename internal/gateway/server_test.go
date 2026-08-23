@@ -23,9 +23,14 @@ func TestTranscriptionVocabularyContainsRussianCommandsAndEntities(t *testing.T)
 
 func TestInstructionsRejectUncertainForeignTranscript(t *testing.T) {
 	instructions := buildInstructions(nil, "audio", nil)
-	for _, phrase := range []string{"только как русскую речь", "нерусскую или сомнительную", "turn_on", "turn_off", "точным полям action", "gachi-стиле", "обязательно содержит обращение «мастер»", "Обычные вопросы"} {
+	for _, phrase := range []string{"только как русскую речь", "нерусскую или сомнительную", "turn_on", "turn_off", "точным полям action", "gachi-стиле", "обращайся «мастер»", "Dungeon Master", "Boss of this gym", "Fisting is three hundred bucks", "Обычные вопросы"} {
 		if !strings.Contains(instructions, phrase) {
 			t.Fatalf("instructions do not contain %q", phrase)
+		}
+	}
+	for _, forbidden := range []string{"никогда не говори «босс»", "не добавляй сексуальных подробностей"} {
+		if strings.Contains(instructions, forbidden) {
+			t.Fatalf("instructions still contain removed rule %q", forbidden)
 		}
 	}
 }
