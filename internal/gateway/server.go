@@ -296,7 +296,7 @@ func (server *Server) satellite(response http.ResponseWriter, request *http.Requ
 			"type": "wake_ready", "protocolVersion": 1, "transport": "binary", "phrase": detector.Phrase(),
 			"inputAudio": map[string]any{"encoding": "pcm_s16le", "sampleRate": 16000, "channels": 1},
 		})
-		preRoll, score, err := waitForServerWake(ctx, detector, audioFrames, readerErrors, func(maxScore float32, peakDBFS float64) {
+		_, score, err := waitForServerWake(ctx, detector, audioFrames, readerErrors, func(maxScore float32, peakDBFS float64) {
 			writer.send(ctx, map[string]any{
 				"type": "wake_status", "maxScore": maxScore, "peakDBFS": peakDBFS,
 				"threshold": effectiveWakeThreshold(server.config.WakeThreshold),
@@ -310,10 +310,14 @@ func (server *Server) satellite(response http.ResponseWriter, request *http.Requ
 		}
 		server.logger.Printf("server wake %s: detected score %.3f", satelliteID, score)
 		writer.send(ctx, map[string]any{"type": "wake_detected", "phrase": detector.Phrase(), "score": score})
-		if err := server.runSatelliteLive(ctx, writer, provider, satelliteID, preRoll, audioFrames, readerErrors); err != nil {
+		// Do not forward the wake-word pre-roll to the provider. The persistent
+		// reader keeps buffering every frame after detection while Live connects,
+		// so the command is preserved without making "Куза" a separate VAD turn.
+		if err := server.runSatelliteLive(ctx, writer, provider, satelliteID, nil, audioFrames, readerErrors); err != nil {
 			if isNormalClose(err) || errors.Is(err, context.Canceled) {
 				return
 			}
+			server.logger.Printf("satellite live %s: %v", satelliteID, err)
 			writer.send(ctx, map[string]any{"type": "error", "message": err.Error()})
 		}
 		if !drainAudioFrames(audioFrames) {
@@ -441,6 +445,7 @@ func (server *Server) runSatelliteLive(
 		"type": "live_ready", "provider": provider.ID(), "model": provider.Model(), "responseMode": "audio",
 		"outputAudio": map[string]any{"encoding": "pcm_s16le", "sampleRate": 24000, "channels": 1},
 	})
+	server.logger.Printf("satellite live %s: connected %s %s", satelliteID, provider.ID(), provider.Model())
 	if len(preRoll) > 0 {
 		if err := conversation.sendAudio(preRoll); err != nil {
 			return err
@@ -506,11 +511,17 @@ func (server *Server) runSatelliteLive(
 				switch deliver.Kind {
 				case liveapi.EventToolCall:
 					toolExecuted = true
+					for _, call := range deliver.ToolCalls {
+						server.logger.Printf("satellite live %s: tool %s %v", satelliteID, call.Name, call.Args)
+					}
+				case liveapi.EventInputTranscript:
+					server.logger.Printf("satellite live %s: user %q", satelliteID, strings.TrimSpace(deliver.Text))
 				case liveapi.EventOutputTranscript, liveapi.EventTextDelta:
 					assistantText.WriteString(deliver.Text)
 				}
 				server.relayMessage(ctx, writer, conversation, deliver, "audio", satelliteID, true)
 				if deliver.Kind == liveapi.EventTurnComplete {
+					server.logger.Printf("satellite live %s: turn complete tool=%t assistant=%q", satelliteID, toolExecuted, strings.TrimSpace(assistantText.String()))
 					if toolExecuted || !asksForClarification(assistantText.String()) {
 						return nil
 					}
