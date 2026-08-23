@@ -23,7 +23,7 @@ func main() {
 	logger.Printf("Default voice provider: %s", cfg.DefaultProvider)
 	logger.Printf("Gemini Live model: %s", cfg.GeminiModel)
 	logger.Printf("OpenAI Realtime model: %s", cfg.OpenAIModel)
-	if err := http.ListenAndServe(address, server.Handler(".")); err != nil {
+	if err := http.ListenAndServe(address, server.Handler()); err != nil {
 		logger.Fatal(err)
 	}
 }

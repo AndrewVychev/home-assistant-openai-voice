@@ -2,13 +2,13 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -67,15 +67,10 @@ func New(cfg config.Config, logger *log.Logger) *Server {
 	}
 }
 
-func (server *Server) Handler(projectRoot string) http.Handler {
+func (server *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
-	mux.HandleFunc("POST /api/ha/entity", server.homeAction)
 	mux.HandleFunc("GET /live", server.live)
-	mux.HandleFunc("GET /gemini-live", server.live)
-	mux.Handle("/vendor/tfjs/", http.StripPrefix("/vendor/tfjs/", http.FileServer(http.Dir(filepath.Join(projectRoot, "node_modules/@tensorflow/tfjs/dist")))))
-	mux.Handle("/vendor/speech-commands/", http.StripPrefix("/vendor/speech-commands/", http.FileServer(http.Dir(filepath.Join(projectRoot, "node_modules/@tensorflow-models/speech-commands/dist")))))
-	mux.Handle("/", http.FileServer(http.Dir(filepath.Join(projectRoot, "public"))))
 	return withRecovery(server.logger, mux)
 }
 
@@ -109,34 +104,27 @@ func (server *Server) health(response http.ResponseWriter, request *http.Request
 	})
 }
 
-func (server *Server) homeAction(response http.ResponseWriter, request *http.Request) {
-	var body struct {
-		EntityID    string  `json:"entity_id"`
-		Action      string  `json:"action"`
-		Temperature float64 `json:"temperature"`
-	}
-	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 16<<10))
-	if err := decoder.Decode(&body); err != nil {
-		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "Некорректный JSON."})
-		return
-	}
-	if body.Action == "" {
-		body.Action = "get_state"
-	}
-	result, err := server.home.Perform(request.Context(), body.EntityID, body.Action, body.Temperature)
-	if err != nil {
-		writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(response, http.StatusOK, result)
-}
-
 func (server *Server) live(response http.ResponseWriter, request *http.Request) {
+	if !authorizedSatellite(request, server.config.SatelliteToken) {
+		response.Header().Set("WWW-Authenticate", "Bearer")
+		writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "Неверный токен сателлита."})
+		return
+	}
+	protocol := request.URL.Query().Get("protocol")
+	if protocol != "" && protocol != "1" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "Неподдерживаемая версия satellite protocol."})
+		return
+	}
+	transportQuery := request.URL.Query().Get("transport")
+	if transportQuery != "" && transportQuery != "binary" && transportQuery != "json-base64" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "Неподдерживаемый audio transport."})
+		return
+	}
 	connection, err := websocket.Accept(response, request, &websocket.AcceptOptions{
 		OriginPatterns: []string{"localhost:*", "127.0.0.1:*"},
 	})
 	if err != nil {
-		server.logger.Printf("browser websocket: %v", err)
+		server.logger.Printf("satellite websocket: %v", err)
 		return
 	}
 	connection.SetReadLimit(2 << 20)
@@ -145,11 +133,7 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 
 	providerID := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("provider")))
 	if providerID == "" {
-		if request.URL.Path == "/gemini-live" {
-			providerID = "gemini"
-		} else {
-			providerID = server.config.DefaultProvider
-		}
+		providerID = server.config.DefaultProvider
 	}
 	provider, ok := server.providers[providerID]
 	if !ok {
@@ -174,7 +158,7 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 	}
 	satelliteID := strings.TrimSpace(request.URL.Query().Get("satellite_id"))
 	if satelliteID == "" {
-		satelliteID = "browser"
+		satelliteID = "anonymous"
 	}
 	if len(satelliteID) > 64 {
 		satelliteID = satelliteID[:64]
@@ -194,13 +178,21 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 	conversation := &liveSession{session: session}
 	buffer := &responseBuffer{}
 	defer conversation.close()
+	binaryAudio := transportQuery == "binary"
+	transport := "json-base64"
+	if binaryAudio {
+		transport = "binary"
+	}
 	writer.send(ctx, map[string]any{
-		"type": "ready", "provider": provider.ID(), "model": provider.Model(), "responseMode": responseMode,
+		"type": "ready", "protocolVersion": 1, "transport": transport,
+		"provider": provider.ID(), "model": provider.Model(), "responseMode": responseMode,
+		"inputAudio":  map[string]any{"encoding": "pcm_s16le", "sampleRate": 16000, "channels": 1},
+		"outputAudio": map[string]any{"encoding": "pcm_s16le", "sampleRate": 24000, "channels": 1},
 	})
 
 	readErrors := make(chan error, 1)
 	go func() {
-		readErrors <- server.readBrowser(ctx, connection, conversation)
+		readErrors <- server.readSatellite(ctx, connection, conversation, binaryAudio)
 		conversation.close()
 	}()
 
@@ -208,9 +200,9 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 		message, receiveErr := conversation.receive()
 		if receiveErr != nil {
 			select {
-			case browserErr := <-readErrors:
-				if browserErr != nil && !isNormalClose(browserErr) {
-					server.logger.Printf("browser receive: %v", browserErr)
+			case satelliteErr := <-readErrors:
+				if satelliteErr != nil && !isNormalClose(satelliteErr) {
+					server.logger.Printf("satellite receive: %v", satelliteErr)
 				}
 			default:
 				if !isNormalClose(receiveErr) && !errors.Is(receiveErr, context.Canceled) {
@@ -220,22 +212,40 @@ func (server *Server) live(response http.ResponseWriter, request *http.Request) 
 			return
 		}
 		for _, deliver := range buffer.accept(message) {
-			server.relayMessage(ctx, writer, conversation, deliver, responseMode, satelliteID)
+			server.relayMessage(ctx, writer, conversation, deliver, responseMode, satelliteID, binaryAudio)
 		}
 	}
 }
 
-func (server *Server) readBrowser(ctx context.Context, connection *websocket.Conn, conversation *liveSession) error {
+func (server *Server) readSatellite(ctx context.Context, connection *websocket.Conn, conversation *liveSession, binaryAudio bool) error {
 	for {
-		var event clientEvent
-		if err := wsjson.Read(ctx, connection, &event); err != nil {
+		messageType, payload, err := connection.Read(ctx)
+		if err != nil {
 			return err
+		}
+		if messageType == websocket.MessageBinary {
+			if !binaryAudio {
+				return errors.New("binary audio requires transport=binary")
+			}
+			if len(payload) > 0 {
+				if err := conversation.sendAudio(payload); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if messageType != websocket.MessageText {
+			return fmt.Errorf("unsupported websocket message type: %d", messageType)
+		}
+		var event clientEvent
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return fmt.Errorf("decode satellite event: %w", err)
 		}
 		switch event.Type {
 		case "audio":
 			data, err := base64.StdEncoding.DecodeString(event.Data)
 			if err != nil {
-				return fmt.Errorf("decode browser audio: %w", err)
+				return fmt.Errorf("decode satellite audio: %w", err)
 			}
 			if err := conversation.sendAudio(data); err != nil {
 				return err
@@ -254,7 +264,7 @@ func (server *Server) readBrowser(ctx context.Context, connection *websocket.Con
 	}
 }
 
-func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, conversation *liveSession, event liveapi.Event, responseMode, satelliteID string) {
+func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, conversation *liveSession, event liveapi.Event, responseMode, satelliteID string, binaryAudio bool) {
 	switch event.Kind {
 	case liveapi.EventInputTranscript:
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "text": event.Text})
@@ -262,10 +272,14 @@ func (server *Server) relayMessage(ctx context.Context, writer *socketWriter, co
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "text": event.Text})
 	case liveapi.EventAudioDelta:
 		if responseMode == "audio" && len(event.Audio) > 0 {
-			writer.send(ctx, map[string]any{
-				"type": string(event.Kind), "data": base64.StdEncoding.EncodeToString(event.Audio),
-				"mimeType": valueOr(event.MIMEType, "audio/pcm;rate=24000"),
-			})
+			if binaryAudio {
+				writer.sendBinary(ctx, event.Audio)
+			} else {
+				writer.send(ctx, map[string]any{
+					"type": string(event.Kind), "data": base64.StdEncoding.EncodeToString(event.Audio),
+					"mimeType": valueOr(event.MIMEType, "audio/pcm;rate=24000"),
+				})
+			}
 		}
 	case liveapi.EventSpeechStarted, liveapi.EventSpeechStopped:
 		writer.send(ctx, map[string]any{"type": string(event.Kind), "audioMs": event.AudioMS})
@@ -506,6 +520,22 @@ func (writer *socketWriter) send(ctx context.Context, value any) {
 	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_ = wsjson.Write(writeCtx, writer.connection, value)
+}
+
+func (writer *socketWriter) sendBinary(ctx context.Context, data []byte) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_ = writer.connection.Write(writeCtx, websocket.MessageBinary, data)
+}
+
+func authorizedSatellite(request *http.Request, expectedToken string) bool {
+	if expectedToken == "" {
+		return true
+	}
+	provided := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) == 1
 }
 
 func (conversation *liveSession) receive() (liveapi.Event, error) {

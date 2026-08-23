@@ -2,14 +2,52 @@ package gateway
 
 import (
 	"errors"
+	"io"
+	"log"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"homevoice/internal/config"
 	"homevoice/internal/homeassistant"
 	liveapi "homevoice/internal/live"
 )
+
+func TestHeadlessHandlerRejectsUnknownProtocolAndHasNoWebRoot(t *testing.T) {
+	server := New(config.Config{}, log.New(io.Discard, "", 0))
+
+	unknownProtocol := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unknownProtocol, httptest.NewRequest("GET", "/live?protocol=2", nil))
+	if unknownProtocol.Code != 400 {
+		t.Fatalf("unknown protocol status = %d", unknownProtocol.Code)
+	}
+
+	root := httptest.NewRecorder()
+	server.Handler().ServeHTTP(root, httptest.NewRequest("GET", "/", nil))
+	if root.Code != 404 {
+		t.Fatalf("headless root status = %d", root.Code)
+	}
+}
+
+func TestSatelliteAuthorization(t *testing.T) {
+	request := httptest.NewRequest("GET", "/live", nil)
+	if !authorizedSatellite(request, "") {
+		t.Fatal("empty configured token should keep local development available")
+	}
+	if authorizedSatellite(request, "secret") {
+		t.Fatal("missing bearer token was accepted")
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+	if !authorizedSatellite(request, "secret") {
+		t.Fatal("valid bearer token was rejected")
+	}
+	request.Header.Set("Authorization", "Bearer wrong")
+	if authorizedSatellite(request, "secret") {
+		t.Fatal("invalid bearer token was accepted")
+	}
+}
 
 func TestTranscriptionVocabularyContainsRussianCommandsAndEntities(t *testing.T) {
 	entities := []homeassistant.Entity{{EntityID: "climate.living_room", Name: "Кондиционер", Area: "Гостиная"}}

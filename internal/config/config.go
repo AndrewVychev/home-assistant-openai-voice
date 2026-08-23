@@ -20,6 +20,7 @@ type Config struct {
 	OpenAIModel              string
 	OpenAIVoice              string
 	OpenAITranscriptionModel string
+	SatelliteToken           string
 }
 
 func Load() (Config, error) {
@@ -40,6 +41,7 @@ func Load() (Config, error) {
 		OpenAIModel:              valueOrDefault("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1-mini"),
 		OpenAIVoice:              valueOrDefault("OPENAI_VOICE", "marin"),
 		OpenAITranscriptionModel: valueOrDefault("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
+		SatelliteToken:           strings.TrimSpace(os.Getenv("SATELLITE_TOKEN")),
 	}
 	if config.DefaultProvider != "gemini" && config.DefaultProvider != "openai" {
 		return Config{}, errors.New("VOICE_PROVIDER должен быть gemini или openai")

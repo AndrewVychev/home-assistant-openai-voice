@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -23,6 +24,7 @@ type Client struct {
 	Gateway     string
 	Provider    string
 	SatelliteID string
+	Token       string
 	Output      io.Writer
 }
 
@@ -418,7 +420,11 @@ func (client Client) connect(ctx context.Context, responseMode string) (*websock
 		query.Set("satellite_id", client.SatelliteID)
 	}
 	endpoint.RawQuery = query.Encode()
-	connection, _, err := websocket.Dial(ctx, endpoint.String(), nil)
+	options := &websocket.DialOptions{}
+	if client.Token != "" {
+		options.HTTPHeader = http.Header{"Authorization": []string{"Bearer " + client.Token}}
+	}
+	connection, _, err := websocket.Dial(ctx, endpoint.String(), options)
 	return connection, err
 }
 

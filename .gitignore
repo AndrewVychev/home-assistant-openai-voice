@@ -7,3 +7,6 @@ bin/
 wakeword/models/
 wakeword/runtime/
 wakeword-micro/
+android-satellite/.gradle/
+android-satellite/local.properties
+android-satellite/**/build/
