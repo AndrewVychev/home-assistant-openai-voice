@@ -31,7 +31,7 @@ func Load() (Config, error) {
 	if err != nil || port < 1 || port > 65535 {
 		return Config{}, errors.New("PORT должен быть числом от 1 до 65535")
 	}
-	wakeThreshold, err := strconv.ParseFloat(valueOrDefault("HOMEVOICE_WAKE_THRESHOLD", "0.65"), 32)
+	wakeThreshold, err := strconv.ParseFloat(valueOrDefault("HOMEVOICE_WAKE_THRESHOLD", "0.50"), 32)
 	if err != nil || wakeThreshold < 0 || wakeThreshold > 1 {
 		return Config{}, errors.New("HOMEVOICE_WAKE_THRESHOLD должен быть числом от 0 до 1")
 	}
